@@ -1,0 +1,235 @@
+warning: function `compile_ly_to_midi` is never used
+  --> src\audio.rs:13:8
+   |
+13 | pub fn compile_ly_to_midi(ly_path: &Path) -> Result<PathBuf, LilypondxError> {
+   |        ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `parse_midi` is never used
+   --> src\audio.rs:213:8
+    |
+213 | pub fn parse_midi(path: &Path) -> Result<Vec<MidiEvent>, LilypondxError> {
+    |        ^^^^^^^^^^
+
+warning: function `find_lilypond` is never used
+   --> src\audio.rs:305:4
+    |
+305 | fn find_lilypond() -> Result<String, LilypondxError> {
+    |    ^^^^^^^^^^^^^
+
+warning: variants `MarkdownParse`, `LilypondCompile`, and `MidiParse` are never constructed
+  --> src\error.rs:9:5
+   |
+ 4 | pub enum LilypondxError {
+   |          -------------- variants in this enum
+...
+ 9 |     MarkdownParse(String),
+   |     ^^^^^^^^^^^^^
+...
+15 |     LilypondCompile(String),
+   |     ^^^^^^^^^^^^^^^
+...
+18 |     MidiParse(String),
+   |     ^^^^^^^^^
+   |
+   = note: `LilypondxError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `generate_ly_midi` is never used
+   --> src\ly_gen.rs:118:8
+    |
+118 | pub fn generate_ly_midi(score: &Score) -> String {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: field `tick` is never read
+  --> src\note.rs:17:9
+   |
+16 | pub struct BarCheck {
+   |            -------- field in this struct
+17 |     pub tick: u64,
+   |         ^^^^
+   |
+   = note: `BarCheck` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `bar_checks` is never read
+  --> src\note.rs:24:9
+   |
+22 | pub struct ParsedTrack {
+   |            ----------- field in this struct
+23 |     pub notes: Vec<Note>,
+24 |     pub bar_checks: Vec<BarCheck>,
+   |         ^^^^^^^^^^
+   |
+   = note: `ParsedTrack` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `parse_notes_absolute` is never used
+  --> src\note.rs:44:8
+   |
+44 | pub fn parse_notes_absolute(
+   |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `source` is never read
+  --> src\score.rs:43:9
+   |
+39 | pub struct Score {
+   |            ----- field in this struct
+...
+43 |     pub source: PathBuf,
+   |         ^^^^^^
+   |
+   = note: `Score` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `width` and `note_char` are never read
+  --> src\sparkline.rs:8:9
+   |
+ 4 | pub struct SparklineConfig {
+   |            --------------- fields in this struct
+...
+ 8 |     pub width: usize,
+   |         ^^^^^
+...
+12 |     pub note_char: char,
+   |         ^^^^^^^^^
+
+warning: field `sparkline_width` is never read
+  --> src\tui.rs:25:9
+   |
+21 | pub struct App {
+   |            --- field in this struct
+...
+25 |     pub sparkline_width: usize,
+   |         ^^^^^^^^^^^^^^^
+
+warning: `lilypondx` (bin "lilypondx") generated 11 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running `target\debug\lilypondx.exe dump tests/sparkline_demo.md --rows 10`
+=== M (treble) ===
+ C#6 │              •─
+ A#5 │              │ 
+  G5 │              │ 
+  E5 │              │ 
+ C#5 │              │ 
+  B4 │            •─╰ 
+ G#4 │        •─•─╰   
+  F4 │    •─•─╰       
+  D4 │  •─╰           
+  B3 │•─╰             
+     └────────────────
+
+=== M (treble) ===
+ C#7 │╮   
+ A#6 ││   
+  G6 ││   
+  E6 ││   
+ C#6 ││   
+  B5 │•╮  
+ G#5 │ •╮ 
+  F5 │  •╮
+  D5 │   ╮
+  B4 │   •
+     └────
+
+=== M (treble) ===
+ C#6 │      •─╮     
+ A#5 │      │ │     
+  G5 │      │ •─╮   
+  E5 │      │   •─╮ 
+ C#5 │      │     │ 
+  B4 │      │     •─
+ G#4 │    •─╰       
+  F4 │  •─╰         
+  D4 │  │           
+  B3 │•─╰           
+     └──────────────
+
+=== M (treble) ===
+ G#4 │            
+  G4 │        •───
+ F#4 │        │   
+  F4 │       •╰   
+  E4 │      •╰    
+ D#4 │      │     
+  D4 │    •─╰     
+ C#4 │    │       
+  C4 │•───╰       
+  B3 │            
+     └────────────
+
+=== M (treble) ===
+ C#5 │    •─╮     •─
+  B4 │    │ │     │ 
+  A4 │    │ │     │ 
+  G4 │    │ │     │ 
+  F4 │    │ │     │ 
+  D4 │    │ │     │ 
+  C4 │•─╮ │ │ •─╮ │ 
+ A#3 │  │ │ │ │ │ │ 
+ G#3 │  │ │ │ │ │ │ 
+ F#3 │  •─╰ •─╰ •─╰ 
+     └──────────────
+
+=== M (treble) ===
+  F4 │                
+  E4 │                
+  E4 │            •─•─
+ D#4 │            │   
+  D4 │            │   
+  D4 │        •─•─╰   
+ C#4 │        │       
+  C4 │        │       
+  C4 │•─•─•─•─╰       
+  B3 │                
+     └────────────────
+
+=== M (treble) ===
+ F#4 │                
+  F4 │            •─  
+  E4 │            │   
+  E4 │        •─  ╰   
+ D#4 │        │       
+  D4 │    •─  ╰       
+ C#4 │    │           
+ C#4 │    │           
+  C4 │•─  ╰           
+  B3 │                
+     └────────────────
+
+=== M (treble) ===
+ F#4 │              
+  F4 │            •─
+  E4 │            │ 
+  E4 │        ──•─╰ 
+ D#4 │        │     
+  D4 │    ──•─╰     
+ C#4 │    │         
+ C#4 │    │         
+  C4 │•─•─╰         
+  B3 │              
+     └──────────────
+
+=== RH (treble) ===
+ C#6 │      •─
+ A#5 │      │ 
+  G5 │      │ 
+  E5 │      │ 
+ C#5 │      │ 
+  B4 │      │ 
+ G#4 │    •─╰ 
+  F4 │  •─╰   
+  D4 │  │     
+  B3 │•─╰     
+     └────────
+
+=== LH (bass) ===
+ C#2 │•─•─╮   
+  B1 │    │   
+  A1 │    │   
+  G1 │    │   
+  F1 │    │   
+  D1 │    │   
+  C1 │    │   
+ A#0 │    │   
+ G#0 │    │   
+ F#0 │    •─•─
+     └────────
+

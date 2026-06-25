@@ -1,0 +1,18 @@
+[package]
+name = "lilypondx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pulldown-cmark = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+midly = "0.5"
+rustysynth = "1.0"
+cpal = "0.15"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+notify = "7"
+ratatui = "0.28"
+crossterm = "0.28"
