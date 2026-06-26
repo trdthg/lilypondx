@@ -1,4 +1,5 @@
 /target
-assets/tiny.sf2
 *.mid
 *.pdf
+*.ly
+assets/tiny.sf2

@@ -2,12 +2,21 @@
 name = "lilypondx"
 version = "0.1.0"
 edition = "2024"
+description = "Literary music notation with live TUI preview and built-in synth"
+license = "MIT"
+
+[lib]
+name = "lilypondx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lilypondx"
+path = "src/main.rs"
 
 [dependencies]
 pulldown-cmark = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-midly = "0.5"
 rustysynth = "1.0"
 cpal = "0.15"
 anyhow = "1"

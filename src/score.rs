@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct ScoreMetadata {
     pub title: String,
@@ -21,17 +19,12 @@ pub struct ScoreMetadata {
 
 #[derive(Debug, Clone)]
 pub struct Track {
-    /// Track identifier, e.g. "RH", "LH"
     pub name: String,
-    /// Clef, e.g. "treble", "bass"
     pub clef: String,
-    /// Relative pitch anchor, e.g. "c'''" or "c,"
     pub relative: String,
-    /// LilyPond instrument name for MIDI, e.g. "acoustic grand", "acoustic guitar (nylon)"
     pub midi_instrument: Option<String>,
-    /// Raw LilyPond note content from the code block
     pub notes: String,
-    /// Syntax variant: "lilypond" = native pass-through, "lilypondx" = parsed by our engine
+    /// "lilypond" = native pass-through, "lilypondx" = parsed, "test" = expected output
     pub syntax: String,
 }
 
@@ -39,6 +32,4 @@ pub struct Track {
 pub struct Score {
     pub metadata: ScoreMetadata,
     pub tracks: Vec<Track>,
-    /// Source file path (for watch mode)
-    pub source: PathBuf,
 }

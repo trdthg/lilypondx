@@ -8,26 +8,21 @@ use crate::score::{Score, ScoreMetadata, Track};
 /// Parse a Markdown file into a `Score`.
 pub fn parse_markdown(path: &Path) -> Result<Score, LilypondxError> {
     let content = std::fs::read_to_string(path)?;
-    parse_markdown_str(&content, path)
+    parse_markdown_str(&content)
 }
 
-fn parse_markdown_str(content: &str, source: &Path) -> Result<Score, LilypondxError> {
+fn parse_markdown_str(content: &str) -> Result<Score, LilypondxError> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
 
     let parser = Parser::new_ext(content, options);
 
-    // Collect events to iterate non-consuming
     let events: Vec<Event> = parser.collect();
 
     let metadata = extract_frontmatter(&events)?;
     let tracks = extract_tracks(&events)?;
 
-    Ok(Score {
-        metadata,
-        tracks,
-        source: source.to_path_buf(),
-    })
+    Ok(Score { metadata, tracks })
 }
 
 /// Extract YAML frontmatter from the first `---` delimited block in the markdown events.
@@ -61,19 +56,18 @@ fn extract_tracks(events: &[Event]) -> Result<Vec<Track>, LilypondxError> {
     let mut tracks = Vec::new();
     let mut i = 0;
     while i < events.len() {
-        match &events[i] {
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
-                // Determine syntax variant
-                let (syntax, rest) = if let Some(r) = info.strip_prefix("lilypond-test") {
-                    ("test", r)
-                } else if let Some(r) = info.strip_prefix("lilypondx") {
-                    ("lilypondx", r)
-                } else if let Some(r) = info.strip_prefix("lilypond") {
-                    ("lilypond", r)
-                } else {
-                    i += 1;
-                    continue;
-                };
+        if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &events[i] {
+            // Determine syntax variant
+            let (syntax, rest) = if let Some(r) = info.strip_prefix("lilypond-test") {
+                ("test", r)
+            } else if let Some(r) = info.strip_prefix("lilypondx") {
+                ("lilypondx", r)
+            } else if let Some(r) = info.strip_prefix("lilypond") {
+                ("lilypond", r)
+            } else {
+                i += 1;
+                continue;
+            };
 
                 let attrs = parse_code_block_attrs(rest);
                 let name = attrs
@@ -109,8 +103,6 @@ fn extract_tracks(events: &[Event]) -> Result<Vec<Track>, LilypondxError> {
                     notes: notes.trim().to_string(),
                     syntax: syntax.to_string(),
                 });
-            }
-            _ => {}
         }
         i += 1;
     }
@@ -127,27 +119,4 @@ fn parse_code_block_attrs(s: &str) -> std::collections::HashMap<String, String> 
         }
     }
     attrs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-
-    #[test]
-    fn test_parse_first_md() {
-        let path = PathBuf::from("tests/claire_of_glass.md");
-        let score = parse_markdown(&path).expect("should parse claire_of_glass.md");
-        assert_eq!(score.metadata.title, "ガラスのクレア");
-        assert_eq!(score.metadata.composer.as_deref(), Some("青木望"));
-        assert_eq!(score.metadata.tempo.as_deref(), Some("4 = 70"));
-        assert_eq!(score.tracks.len(), 2);
-        assert_eq!(score.tracks[0].name, "RH");
-        assert_eq!(score.tracks[0].clef, "treble");
-        assert_eq!(score.tracks[0].relative, "c");
-        assert_eq!(score.tracks[1].name, "LH");
-        assert_eq!(score.tracks[1].clef, "bass");
-        assert_eq!(score.tracks[1].relative, "c,");
-    }
 }

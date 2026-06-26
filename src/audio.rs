@@ -1,108 +1,54 @@
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
+
 use crate::error::LilypondxError;
+use crate::note;
 use crate::score::Score;
-/// Compile a `.ly` file to MIDI using the `lilypond` command-line tool.
-/// Returns the path to the generated `.mid` file.
-pub fn compile_ly_to_midi(ly_path: &Path) -> Result<PathBuf, LilypondxError> {
-    let lilypond = find_lilypond()?;
-    let output = std::process::Command::new(&lilypond)
-        .arg("-dno-print-pages")
-        .arg("-ddelete-intermediate-files")
-        .arg("-o")
-        .arg(ly_path.parent().unwrap_or(Path::new(".")))
-        .arg(ly_path)
-        .output()
-        .map_err(|e| LilypondxError::LilypondCompile(format!("Failed to run lilypond: {e}")))?;
+use crate::synth::{self, Synth};
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(LilypondxError::LilypondCompile(stderr.into_owned()));
-    }
-
-    // Find the generated .mid file — LilyPond uses \bookOutputName, not the .ly stem
-    let out_dir = ly_path.parent().unwrap_or(Path::new("."));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Try parsing "MIDI output to `...'" from LilyPond output
-    if let Some(midi_name) = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("MIDI output to `").and_then(|s| s.strip_suffix("'...")))
-    {
-        let midi_path = out_dir.join(midi_name);
-        if midi_path.exists() {
-            return Ok(midi_path);
-        }
-    }
-
-    // Fallback: scan for any .mid in output dir
-    if let Ok(entries) = std::fs::read_dir(out_dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().map_or(false, |e| e == "mid") {
-                return Ok(p);
-            }
-        }
-    }
-
-    Err(LilypondxError::LilypondCompile(
-        "MIDI file not found after compilation".into(),
-    ))
+/// A parsed MIDI event ready for the synthesizer.
+#[derive(Debug, Clone)]
+pub struct MidiEvent {
+    pub tick: u64,
+    pub channel: u8,
+    pub command: u8,
+    pub data1: u8,
+    pub data2: u8,
 }
 
 /// Generate MIDI events directly from parsed notes — no LilyPond needed.
-/// This is the fast path for `play`: microseconds instead of ~50ms process spawn.
-pub fn generate_events_direct(
-    score: &Score,
-    ticks_per_beat: u64,
-) -> Vec<MidiEvent> {
+/// Skips `lilypond-test` blocks (syntax == "test").
+pub fn generate_events_direct(score: &Score, ticks_per_beat: u32) -> Vec<MidiEvent> {
     let mut events = Vec::new();
 
     for (ch, track) in score.tracks.iter().enumerate() {
+        if track.syntax == "test" {
+            continue;
+        }
         let channel = ch as u8;
-        let anchor = &track.relative;
-        let parsed = crate::note::parse_notes_relative(
-            &track.notes,
-            anchor,
-            ticks_per_beat as u32,
-        );
+        let parsed = note::parse_notes_relative(&track.notes, &track.relative, ticks_per_beat);
 
-        // Program change (instrument)
         let program = midi_program(track.midi_instrument.as_deref().unwrap_or("acoustic grand"));
-        events.push(MidiEvent {
-            tick: 0,
-            channel,
-            command: 0xC0,
-            data1: program,
-            data2: 0,
-        });
+        events.push(MidiEvent { tick: 0, channel, command: 0xC0, data1: program, data2: 0 });
 
         let mut current_tick: u64 = 0;
-        for note in &parsed.notes {
-            if let Some(pitch) = note.pitch {
+        for n in &parsed.notes {
+            if let Some(pitch) = n.pitch {
                 events.push(MidiEvent {
-                    tick: current_tick,
-                    channel,
-                    command: 0x90,
-                    data1: pitch,
-                    data2: 80,
+                    tick: current_tick, channel, command: 0x90, data1: pitch, data2: 80,
                 });
-                let off_tick = current_tick + note.duration as u64;
                 events.push(MidiEvent {
-                    tick: off_tick,
+                    tick: current_tick + n.duration as u64,
                     channel,
                     command: 0x80,
                     data1: pitch,
                     data2: 64,
                 });
             }
-            current_tick += note.duration as u64;
+            current_tick += n.duration as u64;
         }
     }
 
@@ -195,155 +141,25 @@ fn midi_program(name: &str) -> u8 {
         "ocarina" => 79,
         "lead 1 (square)" => 80,
         "lead 2 (sawtooth)" => 81,
-        _ => 0, // default to acoustic grand
+        _ => 0,
     }
 }
 
-/// A parsed MIDI event ready for the synthesizer.
-#[derive(Debug, Clone)]
-pub struct MidiEvent {
-    pub tick: u64,
-    pub channel: u8,
-    pub command: u8,
-    pub data1: u8,
-    pub data2: u8,
-}
+// ── Audio player ───────────────────────────────────────────────────────────
 
-/// Parse a `.mid` file into a vector of `MidiEvent`s.
-pub fn parse_midi(path: &Path) -> Result<Vec<MidiEvent>, LilypondxError> {
-    let mut file = File::open(path)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-
-    let smf = Smf::parse(&buf)
-        .map_err(|e| LilypondxError::MidiParse(format!("Failed to parse MIDI: {e}")))?;
-
-    let _ticks_per_beat = match smf.header.timing {
-        Timing::Metrical(t) => t.as_int() as u64,
-        _ => 480,
-    };
-    let mut events = Vec::new();
-
-    for track in smf.tracks {
-        let mut abs_tick: u64 = 0;
-        for event in track {
-            abs_tick += event.delta.as_int() as u64;
-            match event.kind {
-                TrackEventKind::Midi {
-                    channel, message, ..
-                } => {
-                    let (command, data1, data2) = match message {
-                        MidiMessage::NoteOn { key, vel } => {
-                            if vel == 0 {
-                                (0x80, key.as_int(), 64) // NoteOff
-                            } else {
-                                (0x90, key.as_int(), vel.as_int())
-                            }
-                        }
-                        MidiMessage::NoteOff { key, vel: _ } => (0x80, key.as_int(), 64),
-                        MidiMessage::Controller { controller, value } => {
-                            (0xB0, controller.as_int(), value.as_int())
-                        }
-                        MidiMessage::ProgramChange { program } => (0xC0, program.as_int(), 0),
-                        _ => continue,
-                    };
-                    events.push(MidiEvent {
-                        tick: abs_tick,
-                        channel: channel.as_int(),
-                        command,
-                        data1,
-                        data2,
-                    });
-                }
-                TrackEventKind::Meta(MetaMessage::Tempo(tempo)) => {
-                    // Store tempo changes as meta events for timing
-                    events.push(MidiEvent {
-                        tick: abs_tick,
-                        channel: 0,
-                        command: 0xFF,
-                        data1: 0x51,
-                        data2: (tempo.as_int() & 0xFF) as u8,
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-
-    events.sort_by_key(|e| e.tick);
-
-    // Keep tempo events separate from note events
-    // The audio loop will handle tempo
-    Ok(events)
-}
-
-/// Find a SoundFont file. Checks common locations.
-pub fn find_soundfont() -> Result<PathBuf, LilypondxError> {
-    let candidates = [
-        // Bundled tiny soundfont
-        Path::new("assets/tiny.sf2"),
-        // Common system locations
-        Path::new("/usr/share/sounds/sf2/FluidR3_GM.sf2"),
-        Path::new("/usr/share/soundfonts/FluidR3_GM.sf2"),
-        // Windows
-        Path::new("C:/Windows/System32/Drivers/gm.dls"),
-    ];
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.to_path_buf());
-        }
-    }
-
-    Err(LilypondxError::SoundFont(
-        "No SoundFont found. Download a .sf2 file (e.g. FluidR3_GM.sf2) and place it as assets/tiny.sf2 or set LILYPONDX_SF2 env var.\n\
-         Quick start: https://musical-artifacts.com/artifacts/3".into(),
-    ))
-}
-
-/// Find the LilyPond executable. Checks env var, winget install, and PATH.
-fn find_lilypond() -> Result<String, LilypondxError> {
-    // 1. Check env var
-    if let Ok(path) = std::env::var("LILYPONDX_LILYPOND") {
-        if Path::new(&path).exists() {
-            return Ok(path);
-        }
-    }
-
-    // 2. Check common Windows winget install
-    let winget_base = std::env::var("LOCALAPPDATA")
-        .unwrap_or_default();
-    let winget_candidate = Path::new(&winget_base)
-        .join("Microsoft/WinGet/Packages/LilyPond.LilyPond_Microsoft.Winget.Source_8wekyb3d8bbwe");
-    if let Ok(entries) = std::fs::read_dir(&winget_candidate) {
-        for entry in entries.flatten() {
-            let bin = entry.path().join("bin/lilypond.exe");
-            if bin.exists() {
-                return Ok(bin.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    // 3. Fall back to PATH
-    Ok("lilypond".to_string())
-}
 pub struct AudioPlayer {
     pub events: Vec<MidiEvent>,
-    pub ticks_per_beat: u64,
+    pub ticks_per_beat: u32,
     pub tempo_bpm: u32,
-    pub playing: Arc<AtomicBool>,
-    /// Current playback position in ticks (updated by audio callback).
-    pub current_tick: Arc<AtomicU64>,
-    /// Total duration in ticks.
+    playing: Arc<AtomicBool>,
+    current_tick: Arc<AtomicU64>,
     pub total_ticks: u64,
+    last_error: Arc<Mutex<Option<String>>>,
+    backend_slot: Arc<Mutex<String>>,
 }
 
 impl AudioPlayer {
-    pub fn new(
-        events: Vec<MidiEvent>,
-        ticks_per_beat: u64,
-        tempo_bpm: u32,
-    ) -> Self {
+    pub fn new(events: Vec<MidiEvent>, ticks_per_beat: u32, tempo_bpm: u32) -> Self {
         let total_ticks = events.iter().map(|e| e.tick).max().unwrap_or(0);
         Self {
             events,
@@ -352,80 +168,124 @@ impl AudioPlayer {
             playing: Arc::new(AtomicBool::new(true)),
             current_tick: Arc::new(AtomicU64::new(0)),
             total_ticks,
+            last_error: Arc::new(Mutex::new(None)),
+            backend_slot: Arc::new(Mutex::new(String::new())),
         }
     }
 
-    /// Play audio in a background thread — returns immediately.
-    /// Progress readable via `self.progress()`; call `stop()` to interrupt.
-    pub fn play_background(&self, sf2_path: &Path) -> Result<(), LilypondxError> {
-        let sf2_path = sf2_path.to_path_buf();
+    /// Play in a background thread from `start_tick` (0 = beginning).
+    pub fn play_background_from(&self, start_tick: u64) -> Result<(), LilypondxError> {
         let events = self.events.clone();
         let ticks_per_beat = self.ticks_per_beat;
         let tempo_bpm = self.tempo_bpm;
         let playing = self.playing.clone();
         let current_tick = self.current_tick.clone();
+        let last_error = self.last_error.clone();
+        let backend_out = self.backend_slot.clone();
 
+        current_tick.store(start_tick, Ordering::Relaxed);
         std::thread::spawn(move || {
             if let Err(e) = play_impl(
-                &sf2_path, &events, ticks_per_beat, tempo_bpm,
-                &playing, &current_tick,
+                &events, ticks_per_beat, tempo_bpm, &playing, &current_tick,
+                &last_error, &backend_out, start_tick,
             ) {
-                eprintln!("Playback error: {e}");
+                *last_error.lock().unwrap() = Some(format!("{e}"));
             }
         });
         Ok(())
     }
 
-    /// Stop background playback.
+    /// Play in a background thread from the beginning.
+    pub fn play_background(&self) -> Result<(), LilypondxError> {
+        self.play_background_from(0)
+    }
+
     pub fn stop(&self) {
         self.playing.store(false, Ordering::Relaxed);
     }
 
-    /// Fraction 0.0–1.0 of playback completed.
     pub fn progress(&self) -> f64 {
-        if self.total_ticks == 0 { return 0.0; }
+        if self.total_ticks == 0 {
+            return 0.0;
+        }
         (self.current_tick.load(Ordering::Relaxed) as f64 / self.total_ticks as f64).min(1.0)
     }
 
-    /// Play blocking (used by `cmd_play`).
-    pub fn play(&self, sf2_path: &Path) -> Result<(), LilypondxError> {
+    /// Last playback error captured by the audio thread, if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    /// Synth backend name once known ("SoundFont" / "Built-in").
+    pub fn backend_name(&self) -> String {
+        self.backend_slot.lock().unwrap().clone()
+    }
+
+    /// Play blocking from the beginning.
+    pub fn play(&self) -> Result<(), LilypondxError> {
         play_impl(
-            sf2_path, &self.events, self.ticks_per_beat, self.tempo_bpm,
-            &self.playing, &self.current_tick,
+            &self.events, self.ticks_per_beat, self.tempo_bpm, &self.playing, &self.current_tick,
+            &self.last_error, &self.backend_slot, 0,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play_impl(
-    sf2_path: &Path,
     events: &[MidiEvent],
-    ticks_per_beat: u64,
+    ticks_per_beat: u32,
     tempo_bpm: u32,
     playing: &AtomicBool,
     current_tick: &AtomicU64,
+    last_error: &Arc<Mutex<Option<String>>>,
+    backend_out: &Arc<Mutex<String>>,
+    start_tick: u64,
 ) -> Result<(), LilypondxError> {
-    let mut sf2_file = File::open(sf2_path)?;
-    let mut sf2_data = Vec::new();
-    sf2_file.read_to_end(&mut sf2_data)?;
+    let synth = synth::create_synth()?;
+    *backend_out.lock().unwrap() = synth.name().to_string();
 
-    let sound_font = Arc::new(
-        rustysynth::SoundFont::new(&mut std::io::Cursor::new(&sf2_data))
-            .map_err(|e| LilypondxError::SoundFont(format!("Failed to load SoundFont: {e}")))?,
-    );
+    // Advance event_index past events before start_tick.
+    let mut event_index = 0;
+    for (i, e) in events.iter().enumerate() {
+        if e.tick < start_tick {
+            event_index = i + 1;
+        }
+    }
 
-    let settings = rustysynth::SynthesizerSettings::new(44100);
-    let synthesizer = rustysynth::Synthesizer::new(&sound_font, &settings)
-        .map_err(|e| LilypondxError::SoundFont(format!("Failed to create synthesizer: {e}")))?;
+    let samples_per_tick = (44100.0 * 60_000_000.0 / tempo_bpm.max(1) as f64)
+        / (ticks_per_beat as f64 * 1_000_000.0);
+    let start_sample = (start_tick as f64 * samples_per_tick) as u64;
 
     let state = Arc::new(Mutex::new(PlaybackState {
-        synthesizer,
+        synth,
         events: events.to_vec(),
-        event_index: 0,
-        sample_count: 0,
-        current_tempo: 60_000_000 / tempo_bpm.max(1),
-        ticks_per_beat,
-        sample_rate: 44100,
+        event_index,
+        sample_count: start_sample,
+        samples_per_tick,
+        left_buf: vec![0.0; 1024],
+        right_buf: vec![0.0; 1024],
     }));
+
+    // Re-trigger sustained notes crossing the seek point.
+    {
+        let mut st = state.lock().unwrap();
+        let mut i = 0;
+        while i < events.len() && events[i].tick < start_tick {
+            let e = &events[i];
+            if e.command == 0x90 && e.data2 > 0
+                && events[i..].iter().any(|e2| {
+                    e2.tick >= start_tick
+                        && e2.channel == e.channel
+                        && e2.data1 == e.data1
+                        && (e2.command == 0x80 || (e2.command == 0x90 && e2.data2 == 0))
+                })
+            {
+                st.synth
+                    .process_midi_message(e.channel as i32, 0x90, e.data1 as i32, e.data2 as i32);
+            }
+            i += 1;
+        }
+    }
 
     let host = cpal::default_host();
     let device = host
@@ -436,17 +296,17 @@ fn play_impl(
         .default_output_config()
         .map_err(|e| LilypondxError::Audio(format!("Failed to get output config: {e}")))?;
 
+    let err_slot = last_error.clone();
     let state_clone = state.clone();
-
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
             let config: cpal::StreamConfig = config.into();
             device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback_f32(data, &state_clone);
+                    audio_callback(data, &state_clone);
                 },
-                |err| eprintln!("Audio stream error: {err}"),
+                move |err| *err_slot.lock().unwrap() = Some(format!("Audio stream error: {err}")),
                 None,
             )
         }
@@ -454,22 +314,18 @@ fn play_impl(
     }
     .map_err(|e| LilypondxError::Audio(format!("Failed to create audio stream: {e}")))?;
 
-    stream.play().map_err(|e| {
-        LilypondxError::Audio(format!("Failed to play audio stream: {e}"))
-    })?;
+    stream
+        .play()
+        .map_err(|e| LilypondxError::Audio(format!("Failed to play audio stream: {e}")))?;
 
-    // Polling loop: track progress
     while playing.load(Ordering::Relaxed) {
-        let st = state.lock().unwrap();
-        // Estimate tick from last processed event
-        if st.event_index > 0 {
-            let idx = st.event_index.min(st.events.len()) - 1;
-            current_tick.store(st.events[idx].tick, Ordering::Relaxed);
+        let (idx, total) = {
+            let st = state.lock().unwrap();
+            (st.event_index, st.events.len())
+        };
+        if idx > 0 && idx <= total {
+            current_tick.store(state.lock().unwrap().events[idx - 1].tick, Ordering::Relaxed);
         }
-        let total = st.events.len();
-        let idx = st.event_index;
-        drop(st);
-
         if idx >= total {
             std::thread::sleep(Duration::from_millis(500));
             break;
@@ -482,81 +338,47 @@ fn play_impl(
 }
 
 struct PlaybackState {
-    synthesizer: rustysynth::Synthesizer,
+    synth: Box<dyn Synth>,
     events: Vec<MidiEvent>,
     event_index: usize,
     sample_count: u64,
-    current_tempo: u32, // microseconds per beat
-    ticks_per_beat: u64,
-    sample_rate: u32,
+    samples_per_tick: f64,
+    left_buf: Vec<f32>,
+    right_buf: Vec<f32>,
 }
 
-fn audio_callback_f32(data: &mut [f32], state: &Mutex<PlaybackState>) {
+fn audio_callback(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>) {
     let mut st = state.lock().unwrap();
-    let samples_per_tick = (st.sample_rate as f64 * st.current_tempo as f64)
-        / (st.ticks_per_beat as f64 * 1_000_000.0);
+    let half = data.len() / 2;
+    if st.left_buf.len() != half {
+        st.left_buf.resize(half, 0.0);
+        st.right_buf.resize(half, 0.0);
+    }
 
-    let mut left_buf = vec![0.0f32; data.len() / 2];
-    let mut right_buf = vec![0.0f32; data.len() / 2];
-
-    // Process pending MIDI events for this buffer
-    let end_sample = st.sample_count + (data.len() / 2) as u64;
+    let end_sample = st.sample_count + half as u64;
+    let spt = st.samples_per_tick;
     while st.event_index < st.events.len() {
-        let event_sample = (st.events[st.event_index].tick as f64 * samples_per_tick) as u64;
+        let event_sample = (st.events[st.event_index].tick as f64 * spt) as u64;
         if event_sample > end_sample {
             break;
         }
-
-        let ev = &st.events[st.event_index];
-        let channel = ev.channel;
-        let command = ev.command;
-        let data1 = ev.data1;
-        let data2 = ev.data2;
-
-        if command == 0xFF && data1 == 0x51 {
-            st.event_index += 1;
-            continue;
-        }
-
-        st.synthesizer
-            .process_midi_message(channel as i32, command as i32, data1 as i32, data2 as i32);
-
+        let ev = st.events[st.event_index].clone();
+        st.synth.process_midi_message(
+            ev.channel as i32,
+            ev.command as i32,
+            ev.data1 as i32,
+            ev.data2 as i32,
+        );
         st.event_index += 1;
     }
 
-    st.synthesizer.render(&mut left_buf[..], &mut right_buf[..]);
+    let PlaybackState { synth, left_buf, right_buf, .. } = &mut *st;
+    synth.render(&mut left_buf[..half], &mut right_buf[..half]);
 
-    // Interleave into output buffer
-    for (i, (l, r)) in left_buf.iter().zip(right_buf.iter()).enumerate() {
-        data[i * 2] = *l;
-        data[i * 2 + 1] = *r;
+    for i in 0..half {
+        data[i * 2] = left_buf[i];
+        data[i * 2 + 1] = right_buf[i];
     }
-
 
     st.sample_count = end_sample;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_midi() {
-        let midi_path = Path::new("/tmp/score_midi.mid");
-        if !midi_path.exists() {
-            eprintln!("Skipping test: MIDI file not found (run lilypond first)");
-            return;
-        }
-        let events = parse_midi(midi_path).expect("should parse MIDI");
-        assert!(!events.is_empty(), "should have MIDI events");
-
-        // Should have at least NoteOn events
-        let has_notes = events.iter().any(|e| e.command == 0x90);
-        assert!(has_notes, "should have NoteOn events");
-
-        // Events should be sorted by tick
-        for w in events.windows(2) {
-            assert!(w[0].tick <= w[1].tick, "events should be sorted by tick");
-        }
-    }
 }
