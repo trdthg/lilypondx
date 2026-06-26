@@ -69,8 +69,7 @@ impl App {
 
     pub fn start_playback(&mut self) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let tempo_bpm = tempo_from(&self.score);
-        let events = crate::audio::generate_events_direct(&self.score, TICKS_PER_BEAT);
+        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
         if events.is_empty() {
             return Ok(());
         }
@@ -108,8 +107,7 @@ impl App {
     /// Seek to a fractional position; restart playback from there.
     pub fn seek(&mut self, fraction: f64) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let tempo_bpm = tempo_from(&self.score);
-        let events = crate::audio::generate_events_direct(&self.score, TICKS_PER_BEAT);
+        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
         if events.is_empty() {
             return Ok(());
         }

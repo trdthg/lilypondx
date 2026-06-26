@@ -61,6 +61,30 @@ fn parse_notes_impl(
                     }
                 }
             }
+            ';' => {
+                // ;; line comment — skip rest of line
+                if matches!(chars.peek(), Some(';')) {
+                    chars.next(); // consume second ;
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                }
+                // single ; — ignore it
+            }
+            '/' => {
+                if matches!(chars.peek(), Some('/')) {
+                    chars.next(); // consume second /
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                }
+            }
             '\\' => {
                 skip_command(&mut chars);
             }

@@ -5,6 +5,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::error::LilypondxError;
+use crate::midi_file;
 use crate::note;
 use crate::score::Score;
 use crate::synth::{self, Synth};
@@ -19,15 +20,17 @@ pub struct MidiEvent {
     pub data2: u8,
 }
 
-/// Generate MIDI events directly from parsed notes — no LilyPond needed.
-/// Skips `lilypond-test` blocks (syntax == "test").
-pub fn generate_events_direct(score: &Score, ticks_per_beat: u32) -> Vec<MidiEvent> {
+/// Generate MIDI events for all tracks.
+/// - `lilypondx` tracks: use internal parser (no external deps)
+/// - `lilypond` tracks: call the real LilyPond compiler
+/// - `lilypond-test` blocks: skipped
+/// Returns (events, tempo_bpm).
+pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEvent>, u32), LilypondxError> {
     let mut events = Vec::new();
 
-    for (ch, track) in score.tracks.iter().enumerate() {
-        if track.syntax == "test" {
-            continue;
-        }
+    // ── lilypondx tracks: internal parser ──────────────────────────────
+    let lx_tracks: Vec<_> = score.tracks.iter().filter(|t| t.syntax == "lilypondx").collect();
+    for (ch, track) in lx_tracks.iter().enumerate() {
         let channel = ch as u8;
         let parsed = note::parse_notes_relative(&track.notes, &track.relative, ticks_per_beat);
 
@@ -52,8 +55,38 @@ pub fn generate_events_direct(score: &Score, ticks_per_beat: u32) -> Vec<MidiEve
         }
     }
 
+    // ── lilypond tracks: external LilyPond compiler ────────────────────
+    let lp_tracks: Vec<_> = score.tracks.iter().filter(|t| t.syntax == "lilypond").collect();
+    let tempo_bpm = if !lp_tracks.is_empty() {
+        let (mut lp_events, lp_bpm, _) = midi_file::compile_lilypond_tracks(score)?;
+
+        // Offset channels to avoid overlap with lilypondx tracks
+        let channel_offset = lx_tracks.len() as u8;
+        for e in &mut lp_events {
+            e.channel += channel_offset;
+        }
+
+        events.extend(lp_events);
+        lp_bpm
+    } else {
+        score
+            .metadata
+            .tempo
+            .as_deref()
+            .and_then(|t| t.split('=').nth(1).and_then(|s| s.trim().parse().ok()))
+            .unwrap_or(120)
+    };
+
     events.sort_by_key(|e| e.tick);
-    events
+    Ok((events, tempo_bpm))
+}
+
+/// Deprecated: kept for compatibility.
+/// Use `generate_events` instead.
+pub fn generate_events_direct(score: &Score, ticks_per_beat: u32) -> Vec<MidiEvent> {
+    generate_events(score, ticks_per_beat)
+        .map(|(ev, _)| ev)
+        .unwrap_or_default()
 }
 
 /// Map instrument name to General MIDI program number.
@@ -256,6 +289,7 @@ fn play_impl(
         / (ticks_per_beat as f64 * 1_000_000.0);
     let start_sample = (start_tick as f64 * samples_per_tick) as u64;
 
+    let sample_rate: u64 = 44100;
     let state = Arc::new(Mutex::new(PlaybackState {
         synth,
         events: events.to_vec(),
@@ -264,26 +298,16 @@ fn play_impl(
         samples_per_tick,
         left_buf: vec![0.0; 1024],
         right_buf: vec![0.0; 1024],
+        // Fade in over ~30ms to avoid pops/clicks when seeking.
+        ramp_samples: if start_tick > 0 { (sample_rate / 30).max(1) } else { 0 },
     }));
 
-    // Re-trigger sustained notes crossing the seek point.
+    // Clear any hanging notes from a previous synth session.
     {
         let mut st = state.lock().unwrap();
-        let mut i = 0;
-        while i < events.len() && events[i].tick < start_tick {
-            let e = &events[i];
-            if e.command == 0x90 && e.data2 > 0
-                && events[i..].iter().any(|e2| {
-                    e2.tick >= start_tick
-                        && e2.channel == e.channel
-                        && e2.data1 == e.data1
-                        && (e2.command == 0x80 || (e2.command == 0x90 && e2.data2 == 0))
-                })
-            {
-                st.synth
-                    .process_midi_message(e.channel as i32, 0x90, e.data1 as i32, e.data2 as i32);
-            }
-            i += 1;
+        for ch in 0..16 {
+            st.synth
+                .process_midi_message(ch, 0xB0, 123, 0);
         }
     }
 
@@ -345,6 +369,8 @@ struct PlaybackState {
     samples_per_tick: f64,
     left_buf: Vec<f32>,
     right_buf: Vec<f32>,
+    /// Remaining fade-in samples for seek-start pop suppression.
+    ramp_samples: u64,
 }
 
 fn audio_callback(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>) {
@@ -372,8 +398,20 @@ fn audio_callback(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>) {
         st.event_index += 1;
     }
 
-    let PlaybackState { synth, left_buf, right_buf, .. } = &mut *st;
+    let PlaybackState { synth, left_buf, right_buf, ramp_samples, .. } = &mut *st;
     synth.render(&mut left_buf[..half], &mut right_buf[..half]);
+
+    let ramp = *ramp_samples;
+    if ramp > 0 {
+        let n = half.min(ramp as usize);
+        for i in 0..n {
+            let gain = i as f64 / ramp as f64;
+            let gain = (gain * gain) as f32; // quadratic ease-out
+            left_buf[i] *= gain;
+            right_buf[i] *= gain;
+        }
+        *ramp_samples = ramp.saturating_sub(half as u64);
+    }
 
     for i in 0..half {
         data[i * 2] = left_buf[i];

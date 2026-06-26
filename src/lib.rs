@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod error;
 pub mod ly_gen;
+pub mod midi_file;
 pub mod note;
 pub mod parser;
 pub mod score;

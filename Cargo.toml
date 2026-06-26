@@ -25,3 +25,5 @@ clap = { version = "4", features = ["derive"] }
 notify = "7"
 ratatui = "0.28"
 crossterm = "0.28"
+midly = "0.5"
+tempfile = "3"

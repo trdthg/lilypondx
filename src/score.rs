@@ -15,6 +15,10 @@ pub struct ScoreMetadata {
     pub key: Option<String>,
     #[serde(default)]
     pub time: Option<String>,
+    /// Transposition in semitones (e.g. 12 = up one octave, -12 = down).
+    /// Applied to the generated `.ly` via `\transpose`.
+    #[serde(default)]
+    pub transpose: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
