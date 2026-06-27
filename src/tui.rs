@@ -34,6 +34,8 @@ pub struct App {
     pub grid_rect: Rect,
     /// Total grid columns (cached for mouse mapping).
     pub total_cols: usize,
+    /// Horizontal scroll offset (in grid columns) for the sparkline area.
+    pub scroll_offset: usize,
 }
 
 impl App {
@@ -48,6 +50,7 @@ impl App {
             hover_col: None,
             grid_rect: Rect::ZERO,
             total_cols: 0,
+            scroll_offset: 0,
         }
     }
 
@@ -223,14 +226,38 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
                         }
                         needs_redraw = true;
                     }
+                    KeyCode::Left => {
+                        let step = (app.total_cols.max(20) / 10).max(4);
+                        app.scroll_offset = app.scroll_offset.saturating_sub(step);
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
+                    KeyCode::Right => {
+                        let step = (app.total_cols.max(20) / 10).max(4);
+                        let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
+                        app.scroll_offset = (app.scroll_offset + step).min(max_scroll);
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
+                    KeyCode::Home => {
+                        app.scroll_offset = 0;
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
+                    KeyCode::End => {
+                        let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
+                        app.scroll_offset = max_scroll;
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
                     _ => {}
                 },
                 Event::Mouse(MouseEvent { kind, column, .. }) => match kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        app.hover_col = screen_x_to_col(column, app.grid_rect);
+                        app.hover_col = screen_x_to_col(column, app.grid_rect, app.scroll_offset);
                     }
                     MouseEventKind::Down(_) => {
-                        if let Some(col) = screen_x_to_col(column, app.grid_rect) {
+                        if let Some(col) = screen_x_to_col(column, app.grid_rect, app.scroll_offset) {
                             let frac = if app.total_cols > 0 {
                                 col as f64 / app.total_cols as f64
                             } else {
@@ -264,6 +291,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
             match parser::parse_markdown(&canonical) {
                 Ok(new_score) => {
                     app.reload_error = None;
+                    app.scroll_offset = 0;
                     app.set_score(new_score);
                     let _ = app.start_playback();
                     needs_redraw = true;
@@ -298,11 +326,22 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
     Ok(())
 }
 
-fn screen_x_to_col(x: u16, grid_rect: Rect) -> Option<usize> {
+/// Number of grid columns visible in the terminal (clamped to total_cols).
+fn visible_cols(app: &App) -> usize {
+    app.total_cols.min(app.grid_rect.width as usize)
+}
+
+/// Helpers to clamp scroll_offset so it never exceeds the maximum.
+fn clamp_scroll(app: &mut App) {
+    let max = app.total_cols.saturating_sub(visible_cols(app));
+    app.scroll_offset = app.scroll_offset.min(max);
+}
+
+fn screen_x_to_col(x: u16, grid_rect: Rect, scroll_offset: usize) -> Option<usize> {
     if x < grid_rect.x || x >= grid_rect.x + grid_rect.width {
         return None;
     }
-    Some((x - grid_rect.x) as usize)
+    Some((x - grid_rect.x) as usize + scroll_offset)
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App) {
@@ -362,6 +401,10 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
     let shared_total_ticks = parsed_snapshot.iter().map(|(_, t)| t.total_ticks).max();
     let total_cols = shared_total_ticks.map_or(0, |t| sparkline::total_cols(t, beats_per_bar));
     app.total_cols = total_cols;
+    let visible_width = total_cols.min(area.width.saturating_sub(GRID_X_OFFSET) as usize);
+    app.grid_rect.width = visible_width as u16;
+    clamp_scroll(app);
+    let scroll_offset = app.scroll_offset;
 
     let row_counts: Vec<usize> = visible
         .iter()
@@ -398,13 +441,13 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             hover_col: app.hover_col,
             show_progress_bar: i == n_visible - 1,
         };
-        let (text, _) = sparkline::render_sparkline_widget(parsed_track, &config);
+        let (text, _) = sparkline::render_sparkline_widget(parsed_track, &config, scroll_offset, visible_width);
 
         if i == 0 {
             app.grid_rect = Rect {
                 x: track_areas[i].x + GRID_X_OFFSET,
                 y: track_areas[i].y,
-                width: total_cols as u16,
+                width: visible_width as u16,
                 height: track_areas[i].height,
             };
         }
@@ -451,7 +494,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &mut App) {
     let current_sec = total_sec * progress;
 
     let mut text = format!(
-        " [q]uit  [space] play/pause  [click] seek  |  {play_state}  |  {:.0}%",
+        " [q]uit  [space] play/pause  [←→] scroll  [click] seek  |  {play_state}  |  {:.0}%",
         progress * 100.0
     );
     if total_bars > 0 {

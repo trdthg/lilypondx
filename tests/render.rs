@@ -41,7 +41,7 @@ fn render_color_widget_has_styled_spans() {
     let pairs = common::load_pairs(Path::new("tests/data/render_ascending.md"));
     let pair = &pairs[0];
     let parsed = parse_notes_relative(&pair.input.notes, &pair.input.relative, TICKS_PER_BEAT);
-    let (text, _) = render_sparkline_widget(&parsed, &SparklineConfig::default());
+    let (text, _) = render_sparkline_widget(&parsed, &SparklineConfig::default(), 0, 0);
 
     let has_styled_bg = text.lines.iter().any(|line| {
         line.spans
@@ -59,7 +59,7 @@ fn render_widget_plain_matches_plain_render() {
     let parsed = parse_notes_relative(&pair.input.notes, &pair.input.relative, TICKS_PER_BEAT);
 
     let plain = render_sparkline(&parsed, &SparklineConfig::default());
-    let (text, _) = render_sparkline_widget(&parsed, &SparklineConfig::default());
+    let (text, _) = render_sparkline_widget(&parsed, &SparklineConfig::default(), 0, 0);
     let widget_plain: String = text
         .lines
         .iter()

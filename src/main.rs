@@ -29,13 +29,16 @@ enum Command {
         file: PathBuf,
     },
 
-    /// Generate a .ly file from a Markdown score (dry-run without playback).
+        /// Generate a .ly file from a Markdown score (dry-run without playback).
     Gen {
         /// Path to the .md score file
         file: PathBuf,
         /// Output .ly file (default: derived from input name)
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Generate guitar tablature (TabStaff) alongside standard notation
+        #[arg(short = 'T', long)]
+        tablature: bool,
     },
 
     /// Watch a Markdown score and render live ASCII sparklines on change.
@@ -82,6 +85,9 @@ enum Command {
         /// e.g. 12 = up one octave (useful for guitar notation).
         #[arg(short, long)]
         transpose: Option<i32>,
+        /// Generate guitar tablature (TabStaff) alongside standard notation
+        #[arg(short = 'T', long)]
+        tablature: bool,
     },
 }
 
@@ -97,11 +103,11 @@ fn main() -> Result<(), LilypondxError> {
 
     match cli.command {
         Command::Play { file } => cmd_play(&file),
-        Command::Gen { file, output } => cmd_gen(&file, output),
+        Command::Gen { file, output, tablature } => cmd_gen(&file, output, tablature),
         Command::Watch { file, width, rows } => tui::run_tui(file, width.unwrap_or(0), rows),
         Command::Dump { file, rows: _ } => cmd_dump(&file),
         Command::New { file } => cmd_new(file),
-        Command::Export { file, output, format, transpose } => cmd_export(&file, output, format, transpose),
+        Command::Export { file, output, format, transpose, tablature } => cmd_export(&file, output, format, transpose, tablature),
     }
 }
 
@@ -126,8 +132,11 @@ fn cmd_play(file: &Path) -> Result<(), LilypondxError> {
     Ok(())
 }
 
-fn cmd_gen(file: &Path, output: Option<PathBuf>) -> Result<(), LilypondxError> {
-    let score = parser::parse_markdown(file)?;
+fn cmd_gen(file: &Path, output: Option<PathBuf>, tablature: bool) -> Result<(), LilypondxError> {
+    let mut score = parser::parse_markdown(file)?;
+    if tablature {
+        score.metadata.tablature = true;
+    }
     let ly = ly_gen::generate_ly(&score);
 
     let out_path = output.unwrap_or_else(|| file.with_extension("ly"));
@@ -168,11 +177,14 @@ c1 | c1 | f,1 | g'2 c,2 |
     Ok(())
 }
 
-fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>) -> Result<(), LilypondxError> {
+fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>, tablature: bool) -> Result<(), LilypondxError> {
     let mut score = parser::parse_markdown(file)?;
     // CLI --transpose overrides frontmatter `transpose`
     if transpose.is_some() {
         score.metadata.transpose = transpose;
+    }
+    if tablature {
+        score.metadata.tablature = true;
     }
     let ly = ly_gen::generate_ly(&score);
 

@@ -19,6 +19,9 @@ pub struct ScoreMetadata {
     /// Applied to the generated `.ly` via `\transpose`.
     #[serde(default)]
     pub transpose: Option<i32>,
+    /// Generate guitar tablature (TabStaff) alongside standard notation.
+    #[serde(default)]
+    pub tablature: bool,
 }
 
 #[derive(Debug, Clone)]

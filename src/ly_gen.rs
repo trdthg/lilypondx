@@ -50,12 +50,13 @@ pub fn generate_ly(score: &Score) -> String {
     }
 
     out.push_str("\\score {\n");
-    write_staff_block(&mut out, score, true);
+    let tablature = score.metadata.tablature;
+    write_staff_block(&mut out, score, true, tablature);
     out.push_str("  \\layout { }\n}\n\n");
 
     let midi_name = midi_output_name(&score.metadata.title);
     out.push_str(&format!("{} = {{\n", midi_name));
-    write_staff_block(&mut out, score, false);
+    write_staff_block(&mut out, score, false, false);
     out.push_str("}\n\n");
 
     out.push_str(&format!(
@@ -67,16 +68,30 @@ pub fn generate_ly(score: &Score) -> String {
 }
 
 /// Write a staff block (layout or MIDI). `layout` controls indentation/structure.
-fn write_staff_block(out: &mut String, score: &Score, layout: bool) {
+fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: bool) {
     let tracks: Vec<&Track> = active_tracks(score);
     if layout {
         if tracks.len() == 1 {
             let t = tracks[0];
-            out.push_str(&format!("  \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+            if tablature {
+                out.push_str("  \\new StaffGroup <<\n");
+                out.push_str(&format!("    \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+                out.push_str(&format!("    \\new TabStaff = \"{}_tab\" \\{}\n", t.name, t.name));
+                out.push_str("  >>\n");
+            } else {
+                out.push_str(&format!("  \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+            }
         } else {
             out.push_str("  \\new PianoStaff <<\n");
             for t in &tracks {
-                out.push_str(&format!("    \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+                if tablature {
+                    out.push_str(&format!("    \\new StaffGroup <<\n"));
+                    out.push_str(&format!("      \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+                    out.push_str(&format!("      \\new TabStaff = \"{}_tab\" \\{}\n", t.name, t.name));
+                    out.push_str(&format!("    >>\n"));
+                } else {
+                    out.push_str(&format!("    \\new Staff = \"{}\" \\{}\n", t.name, t.name));
+                }
             }
             out.push_str("  >>\n");
         }

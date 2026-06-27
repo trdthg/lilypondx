@@ -207,9 +207,14 @@ pub fn render_sparkline(track: &ParsedTrack, config: &SparklineConfig) -> String
 /// Render a sparkline as a ratatui `Text` with per-cell styling (rainbow
 /// backgrounds, hover highlight). Returns `(text, total_cols)` so the TUI can
 /// map screen X → grid column for mouse interaction.
+///
+/// `scroll_offset` and `visible_width` control horizontal clipping:
+/// set both to 0 to render the full grid (no clipping).
 pub fn render_sparkline_widget<'a>(
     track: &ParsedTrack,
     config: &SparklineConfig,
+    scroll_offset: usize,
+    visible_width: usize,
 ) -> (Text<'a>, usize) {
     let Some(g) = build_grid(track, config) else {
         return (
@@ -223,6 +228,20 @@ pub fn render_sparkline_widget<'a>(
     };
 
     let mut lines: Vec<Line> = Vec::with_capacity(g.rows.len() + 2);
+
+    // Determine clipping window.
+    let start_col = if visible_width > 0 {
+        scroll_offset.min(g.total_cols.saturating_sub(visible_width))
+    } else {
+        0
+    };
+    let end_col = if visible_width > 0 {
+        (start_col + visible_width).min(g.total_cols)
+    } else {
+        g.total_cols
+    };
+    let vis_cols = end_col - start_col;
+
     for (row, &pitch) in g.rows.iter().zip(&g.label_pitches) {
         let bg = bg_color(pitch);
         let label = pitch_label(pitch);
@@ -230,10 +249,10 @@ pub fn render_sparkline_widget<'a>(
             format!("{label} │"),
             Style::default().bg(bg).fg(Color::Black),
         )];
-        for (col, ch) in row.chars().enumerate() {
+        for (abs_col, ch) in row.chars().enumerate().skip(start_col).take(vis_cols) {
             // Playhead column gets a bright yellow background, keeping the
             // underlying glyph (`━`, ` `, `┊`, `▌`) visible.
-            let style = if Some(col) == g.playhead_col {
+            let style = if Some(abs_col) == g.playhead_col {
                 Style::default().bg(Color::Yellow).fg(Color::Black)
             } else if ch == '▌' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -244,10 +263,10 @@ pub fn render_sparkline_widget<'a>(
         }
         lines.push(Line::from(spans));
     }
-    // Bottom axis.
+    // Bottom axis (clipped).
     lines.push(Line::from(Span::raw(format!(
         "    └{}",
-        "─".repeat(g.total_cols)
+        "─".repeat(vis_cols)
     ))));
 
     if config.show_progress_bar
@@ -256,7 +275,7 @@ pub fn render_sparkline_widget<'a>(
         let p = p.clamp(0.0, 1.0);
         let marker_col = (p * (g.total_cols.saturating_sub(1)) as f64) as usize;
         let mut s = String::from("   ");
-        for col in 0..g.total_cols {
+        for col in start_col..end_col {
             if col == marker_col {
                 s.push('▶');
             } else if col < marker_col {
@@ -317,7 +336,7 @@ pub fn row_count(track: &ParsedTrack) -> usize {
 /// Count grid columns for a timeline, including inserted bar-line columns.
 pub fn total_cols(total_ticks: u64, beats_per_bar: Option<u32>) -> usize {
     let tpc = TICKS_PER_BEAT as u64 / 2;
-    let base = total_ticks.max(1).div_ceil(tpc) as usize;
+    let base = (total_ticks.max(1) / tpc) as usize;
     let bar_count = beats_per_bar
         .filter(|&b| b > 0)
         .map(|b| {
