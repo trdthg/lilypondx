@@ -99,6 +99,7 @@ fn parse_notes_impl(
                 chars.next();
                 // Collect all pitches inside <...>
                 let mut chord_pitches: Vec<u8> = Vec::new();
+                let mut chord_prev = prev_pitch;
                 while let Some(&c) = chars.peek() {
                     if c == '>' {
                         chars.next();
@@ -107,12 +108,14 @@ fn parse_notes_impl(
                     if matches!(c, 'a'..='g') {
                         let (raw_pitch, octave_shift) = parse_pitch_with_octave(&mut chars, relative);
                         let pitch = if relative {
-                            relative_pitch(raw_pitch, octave_shift, prev_pitch)
+                            relative_pitch(raw_pitch, octave_shift, chord_prev)
                         } else {
                             raw_pitch
                         };
                         chord_pitches.push(pitch);
-                        prev_pitch = pitch;
+                        // Inside a chord, each note is relative to the previous
+                        // note *inside* the chord (per LilyPond docs).
+                        chord_prev = pitch;
                     } else {
                         chars.next();
                     }
@@ -120,6 +123,10 @@ fn parse_notes_impl(
                 if chord_pitches.is_empty() {
                     chord_pitches.push(prev_pitch);
                 }
+                // After a chord, prev_pitch = first note of the chord
+                // (per LilyPond: "the first note of the chord is used as
+                // the reference point" for the following note).
+                prev_pitch = chord_pitches[0];
                 let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
                 default_duration = dur;
                 let mut tie = false;
@@ -284,9 +291,11 @@ fn parse_duration(
     };
 
     let mut dur = base_dur;
+    let mut dot_value = base_dur / 2;
     while let Some(&'.') = chars.peek() {
         chars.next();
-        dur += dur / 2;
+        dur += dot_value;
+        dot_value /= 2;
     }
 
     dur

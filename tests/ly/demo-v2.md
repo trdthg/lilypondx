@@ -22,7 +22,7 @@ a4 c <g b>2 <g b>4 <g b>
 
 a4 c <d g>2 <d g>4 <d g>
 e4 f <g b>2 <g b>4 <g b>
-c4 b <a a,>2 <a a,>4 <a a,>
+c4 b <a f>2 <a f>4 <a f>
 c,4 d <g, b>2 <g b>4 <g b>
 ```
 

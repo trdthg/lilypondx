@@ -35,10 +35,10 @@ g <ais d> <ais d> | c, <e ais> <e ais> |
 g <ais d> <ais d> | c, <e ais> <e ais>
 f <a c> <a c>     | c, <a' c> <a c> |
 
-f,4, <a c> <a c>  | c, <a' c> <a c>     |
+f4, <a c> <a c>  | c, <a' c> <a c>     |
 g <ais d> <ais d> | c, <e ais> <e ais> |
 g <ais d> <ais d> | c, <e ais> <e ais> |
 f <a c> <a c>     | c, <e ais> <e ais>
 
-a,4 <cis' a> <cis a>
+a,4 <cis' a> <cis a> g, <f' ais> <f ais>
 ```

@@ -84,48 +84,56 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         .unwrap_or_default();
 
     // Map a tick to a grid column: note columns come from tick/tpc, plus one
-    // extra column inserted at each bar boundary that falls at/before the tick.
+    // extra column inserted at each bar boundary. The bar line column sits at
+    // the boundary; notes starting at the boundary begin one column later.
     let tick_to_col = |tick: u64| -> usize {
         let base = (tick / ticks_per_col) as usize;
-        // A bar line at tick `bt` occupies the column *at* the boundary.
-        // Notes ending exactly at `bt` should not include that column, so use
-        // `<` (strict) when counting bars before an end-tick.
-        let bars_before = bar_ticks.iter().filter(|&&bt| bt < tick).count();
-        base + bars_before
+        // Notes at or after a bar boundary get +1 so the bar line has its own
+        // column to the left of the note.
+        let bars_at_or_before = bar_ticks.iter().filter(|&&bt| bt <= tick).count();
+        base + bars_at_or_before
     };
 
     // total_cols includes the inserted bar columns.
     let total_cols = tick_to_col(total_ticks).max(1);
-    // Bar columns in grid space (the inserted ones).
+    // Bar line columns: at each bar boundary bt, the bar line occupies the
+    // column that would correspond to bt if notes didn't get the +1 shift,
+    // i.e. base + (bars strictly before bt).
     let bar_cols: std::collections::HashSet<usize> = bar_ticks
         .iter()
-        .map(|&bt| tick_to_col(bt))
+        .map(|&bt| {
+            let base = (bt / ticks_per_col) as usize;
+            let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
+            base + bars_before
+        })
         .collect();
 
     // Build the grid as a Vec<String> (one per row) for easy overlay.
     let mut grid = vec![vec![' '; total_cols]; rows];
-    let mut current_tick: u64 = 0;
-    for note in &track.notes {
-        let start_col = tick_to_col(current_tick);
-        let end_col = tick_to_col(current_tick + note.duration as u64);
-        let end_col = end_col.max(start_col + 1).min(total_cols);
-        let start_col = start_col.min(total_cols.saturating_sub(1));
-        for &pitch in &note.pitches {
-            let row = pitch_to_row(pitch);
-            for (col, cell) in grid[row].iter_mut().enumerate().take(end_col).skip(start_col) {
-                if !bar_cols.contains(&col) {
-                    *cell = '━';
-                }
-            }
-        }
-        current_tick += note.duration as u64;
-    }
-
-    // Draw bar lines as full vertical `┊` columns.
+    // Draw bar lines first (as full vertical `┊` columns) so notes overlay on top.
     for &col in &bar_cols {
         for row in grid.iter_mut() {
             row[col] = '┊';
         }
+    }
+    let mut current_tick: u64 = 0;
+    for note in &track.notes {
+        let start_col = tick_to_col(current_tick);
+        // For the end column, use strict `<` so a note ending exactly at a
+        // bar boundary doesn't paint over the bar line column.
+        let end_tick = current_tick + note.duration as u64;
+        let end_base = (end_tick / ticks_per_col) as usize;
+        let end_bars = bar_ticks.iter().filter(|&&bt| bt < end_tick).count();
+        let end_col = (end_base + end_bars).max(start_col + 1).min(total_cols);
+        let start_col = start_col.min(total_cols.saturating_sub(1));
+        for &pitch in &note.pitches {
+            let row = pitch_to_row(pitch);
+            for (_col, cell) in grid[row].iter_mut().enumerate().take(end_col).skip(start_col) {
+                // Notes overlay bar lines — a note's glyph takes precedence.
+                *cell = '━';
+            }
+        }
+        current_tick += note.duration as u64;
     }
 
     // Hover highlight (overlays on top, but keeps note glyphs).
@@ -146,9 +154,11 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     //  - Past the last note: hold at the last pitched note's onset.
     // The head is NOT drawn into the grid (that would erase `━` glyphs);
     // instead we return its column and the widget renderer styles it yellow.
+    // The head never sits on a bar-line column — if it would, it snaps to the
+    // previous note column instead.
     let playhead_col = config.progress.and_then(|p| {
         let p = p.clamp(0.0, 1.0);
-        let current_tick = (p * total_ticks as f64) as u64;
+        let current_tick = (p * total_ticks as f64).round() as u64;
         let mut t: u64 = 0;
         let mut snap: Option<usize> = None;
         let mut last_pitched: Option<usize> = None;
@@ -160,11 +170,24 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
             }
             if snap.is_none() && current_tick < end {
                 if !note.pitches.is_empty() {
-                    snap = Some(tick_to_col(current_tick));
+                    let note_start_col = tick_to_col(start);
+                    let col = tick_to_col(current_tick);
+                    // The playhead should never be before the note's start
+                    // column (can happen due to float rounding in progress→tick),
+                    // and should never land on a bar-line column.
+                    snap = Some(if col < note_start_col || bar_cols.contains(&col) {
+                        note_start_col
+                    } else {
+                        col
+                    });
                 }
                 break;
             }
             t = end;
+        }
+        // Past the last note: hold at the last column (end of piece).
+        if snap.is_none() && current_tick >= total_ticks {
+            snap = Some(total_cols.saturating_sub(1));
         }
         // Rest: snap to next upcoming pitched note.
         if snap.is_none() {
@@ -255,8 +278,11 @@ pub fn render_sparkline_widget<'a>(
                 Style::default().bg(Color::Yellow).fg(Color::Black)
             } else if ch == '▌' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if ch == '━' {
+                // Note glyph: white on the soft background for contrast.
+                Style::default().bg(bg).fg(Color::White)
             } else {
-                Style::default().bg(bg).fg(Color::Black)
+                Style::default().bg(bg).fg(Color::Gray)
             };
             spans.push(Span::styled(ch.to_string(), style));
         }
@@ -296,15 +322,17 @@ pub fn render_sparkline_widget<'a>(
 
 /// Background color for a pitch (rainbow by pitch class). Each accidental
 /// shares the natural's color below it so backgrounds are continuous.
+/// Uses light, low-saturation RGB pastels that blend softly with the
+/// terminal background.
 fn bg_color(midi: u8) -> Color {
     match midi % 12 {
-        0 | 1 => Color::Red,
-        2 | 3 => Color::Yellow,
-        4 => Color::Green,
-        5 | 6 => Color::Cyan,
-        7 | 8 => Color::Blue,
-        9 | 10 => Color::Magenta,
-        11 => Color::Gray,
+        0 | 1 => Color::Rgb(120, 140, 180),  // C  — soft slate blue
+        2 | 3 => Color::Rgb(180, 130, 144),  // D  — soft rose
+        4 => Color::Rgb(140, 172, 124),      // E  — soft sage
+        5 | 6 => Color::Rgb(176, 148, 104),  // F  — soft amber
+        7 | 8 => Color::Rgb(124, 160, 168),  // G  — soft teal
+        9 | 10 => Color::Rgb(160, 128, 176), // A  — soft lavender
+        11 => Color::Rgb(140, 140, 148),      // B  — soft neutral gray
         _ => Color::Reset,
     }
 }
