@@ -51,6 +51,10 @@ enum Command {
         /// Number of pitch rows (kept for backward compat, currently unused)
         #[arg(short, long, default_value = "7")]
         rows: usize,
+        /// Pitch row mode: "auto" (detect scale), "chromatic" (all rows),
+        /// or a key like "c major" / "a minor"
+        #[arg(short = 'S', long, default_value = "auto")]
+        scale: String,
     },
 
     /// Dump ASCII sparklines to stdout (one-shot, no TUI).
@@ -60,6 +64,10 @@ enum Command {
         /// Number of pitch rows (kept for backward compat, currently unused)
         #[arg(short, long, default_value = "10")]
         rows: usize,
+        /// Pitch row mode: "auto" (detect scale), "chromatic" (all rows),
+        /// or a key like "c major" / "a minor"
+        #[arg(short = 'S', long, default_value = "auto")]
+        scale: String,
     },
 
     /// Create a new .md score from a template.
@@ -104,8 +112,8 @@ fn main() -> Result<(), LilypondxError> {
     match cli.command {
         Command::Play { file } => cmd_play(&file),
         Command::Gen { file, output, tablature } => cmd_gen(&file, output, tablature),
-        Command::Watch { file, width, rows } => tui::run_tui(file, width.unwrap_or(0), rows),
-        Command::Dump { file, rows: _ } => cmd_dump(&file),
+        Command::Watch { file, width, rows, scale } => tui::run_tui(file, width.unwrap_or(0), rows, scale),
+        Command::Dump { file, rows: _, scale } => cmd_dump(&file, &scale),
         Command::New { file } => cmd_new(file),
         Command::Export { file, output, format, transpose, tablature } => cmd_export(&file, output, format, transpose, tablature),
     }
@@ -232,8 +240,11 @@ fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transp
     Ok(())
 }
 
-fn cmd_dump(file: &Path) -> Result<(), LilypondxError> {
+fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
     let score = parser::parse_markdown(file)?;
+
+    // Resolve scale mode.
+    let scale_mode = resolve_scale_mode(&score, scale);
 
     // Parse all non-test / non-lilypond tracks for sparkline display.
     // lilypond blocks go through the real LilyPond compiler, not our parser.
@@ -265,6 +276,7 @@ fn cmd_dump(file: &Path) -> Result<(), LilypondxError> {
             beats_per_bar,
             total_ticks_override: shared_total_ticks,
             show_progress_bar: idx == n - 1,
+            scale_mode,
             ..Default::default()
         };
         let spark = sparkline::render_sparkline(parsed, &cfg);
@@ -273,4 +285,37 @@ fn cmd_dump(file: &Path) -> Result<(), LilypondxError> {
         println!();
     }
     Ok(())
+}
+
+/// Resolve the `--scale` CLI argument into a `ScaleMode` (mirrors TUI logic).
+fn resolve_scale_mode(score: &lilypondx::score::Score, arg: &str) -> lilypondx::sparkline::ScaleMode {
+    use lilypondx::note;
+    use lilypondx::sparkline;
+    use lilypondx::TICKS_PER_BEAT;
+
+    match arg.trim() {
+        "chromatic" => sparkline::ScaleMode::Chromatic,
+        "auto" => {
+            if let Some(k) = &score.metadata.key {
+                if let Some(mode) = sparkline::parse_key(k) {
+                    return mode;
+                }
+            }
+            let parsed: Vec<note::ParsedTrack> = score
+                .tracks
+                .iter()
+                .map(|t| note::parse_notes_relative(&t.notes, &t.relative, TICKS_PER_BEAT))
+                .collect();
+            let combined = note::ParsedTrack {
+                notes: parsed.iter().flat_map(|p| p.notes.iter().cloned()).collect(),
+                total_ticks: parsed.iter().map(|p| p.total_ticks).max().unwrap_or(0),
+            };
+            sparkline::detect_scale(&combined)
+                .map(|(_, mask, _)| sparkline::ScaleMode::Diatonic(mask))
+                .unwrap_or(sparkline::ScaleMode::Chromatic)
+        }
+        key_str => {
+            sparkline::parse_key(key_str).unwrap_or(sparkline::ScaleMode::Chromatic)
+        }
+    }
 }

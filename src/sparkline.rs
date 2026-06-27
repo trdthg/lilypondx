@@ -4,6 +4,22 @@ use ratatui::text::{Line, Span, Text};
 use crate::note::ParsedTrack;
 use crate::TICKS_PER_BEAT;
 
+/// Which pitch rows to show in the sparkline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleMode {
+    /// Show only notes of the given scale (major/minor).  The tonic + mode
+    /// are encoded as a bitmask of 7 pitch classes.
+    Diatonic(u16),
+    /// Show all semitone rows (current default behavior).
+    Chromatic,
+}
+
+impl Default for ScaleMode {
+    fn default() -> Self {
+        ScaleMode::Chromatic
+    }
+}
+
 /// Configuration for sparkline rendering.
 #[derive(Default)]
 pub struct SparklineConfig {
@@ -18,6 +34,71 @@ pub struct SparklineConfig {
     pub hover_col: Option<usize>,
     /// Draw the progress bar below the grid (only one voice should set this).
     pub show_progress_bar: bool,
+    /// Which pitch rows to show.
+    pub scale_mode: ScaleMode,
+}
+
+/// Major scale interval pattern (semitone offsets from tonic): W W H W W W H
+/// → 0, 2, 4, 5, 7, 9, 11
+const MAJOR_PITCHES: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+/// Natural minor: 0, 2, 3, 5, 7, 8, 10
+const MINOR_PITCHES: [u8; 7] = [0, 2, 3, 5, 7, 8, 10];
+
+/// Build a 12-bit pitch-class mask for a scale starting at `tonic`.
+pub fn scale_mask(tonic: u8, pitches: &[u8; 7]) -> u16 {
+    pitches.iter().map(|&p| 1u16 << ((tonic + p) % 12)).fold(0, |a, b| a | b)
+}
+
+/// Detect a scale that contains every pitch class used in `track`.
+/// Returns `(tonic, mask, is_major)` for the best-fitting major or minor scale.
+pub fn detect_scale(track: &ParsedTrack) -> Option<(u8, u16, bool)> {
+    let used: u16 = track
+        .notes
+        .iter()
+        .flat_map(|n| n.pitches.iter().copied())
+        .map(|p| 1u16 << (p % 12))
+        .fold(0u16, |a, b| a | b);
+
+    // Try every tonic for major and minor; keep scales whose mask is a
+    // superset of `used`.  Among matches, prefer the one with the fewest
+    // extra pitch classes (tightest fit).
+    let mut best: Option<(u8, u16, bool, u32)> = None;
+    for tonic in 0..12u8 {
+        for (pitches, is_major) in [(&MAJOR_PITCHES, true), (&MINOR_PITCHES, false)] {
+            let mask = scale_mask(tonic, pitches);
+            if used & !mask == 0 {
+                // All used pitches are in this scale.
+                let extra = (mask & !used).count_ones();
+                match best {
+                    None => best = Some((tonic, mask, is_major, extra)),
+                    Some((_, _, _, e)) if extra < e => best = Some((tonic, mask, is_major, extra)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    best.map(|(t, m, maj, _)| (t, m, maj))
+}
+
+/// Parse a LilyPond-style key string like `c \major` or `a \minor` into a
+/// `ScaleMode::Diatonic` with the corresponding pitch-class mask.
+pub fn parse_key(key_str: &str) -> Option<ScaleMode> {
+    // Lowercase, strip backslashes, split into [tonic, mode].
+    let s = key_str.to_lowercase().replace('\\', " ").replace("major", " major").replace("minor", " minor");
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let tonic = match parts[0] {
+        "c" => 0, "cis" => 1, "d" => 2, "dis" => 3, "e" => 4, "f" => 5,
+        "fis" => 6, "g" => 7, "gis" => 8, "a" => 9, "ais" => 10, "b" => 11,
+        _ => return None,
+    };
+    let is_major = parts.iter().rposition(|&p| p == "major" || p == "minor")
+        .map(|i| parts[i] == "major")
+        .unwrap_or(true);
+    let mask = scale_mask(tonic, if is_major { &MAJOR_PITCHES } else { &MINOR_PITCHES });
+    Some(ScaleMode::Diatonic(mask))
 }
 
 /// Built grid + metadata, shared by both renderers.
@@ -46,10 +127,26 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     let min_p = *pitches.iter().min().unwrap();
     let max_p = *pitches.iter().max().unwrap();
 
-    // Chromatic rows: every semitone between (min-1) and (max+1), highest first.
+    // Decide which pitch classes to show.
+    let scale_mask = match config.scale_mode {
+        ScaleMode::Chromatic => None,
+        ScaleMode::Diatonic(mask) => Some(mask),
+    };
+
+    // Build the list of row pitches: every semitone between (min-1) and
+    // (max+1), but in Diatonic mode skip rows whose pitch class is not in the
+    // scale.  Always include min_p and max_p even if they fall outside the
+    // scale (shouldn't happen if detection was correct, but be safe).
     let lo = min_p.saturating_sub(1);
     let hi = max_p.saturating_add(1);
-    let label_pitches: Vec<u8> = (lo..=hi).rev().collect();
+    let mut label_pitches: Vec<u8> = Vec::new();
+    for p in (lo..=hi).rev() {
+        let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
+        let is_edge = p == min_p || p == max_p;
+        if in_scale || is_edge {
+            label_pitches.push(p);
+        }
+    }
     let rows = label_pitches.len();
 
     let pitch_to_row = |pitch: u8| -> usize {
@@ -340,6 +437,11 @@ fn bg_color(midi: u8) -> Color {
 /// How many rows (lines) a track's sparkline will occupy (pitch rows only),
 /// excluding the optional progress bar. For TUI height allocation per voice.
 pub fn row_count(track: &ParsedTrack) -> usize {
+    row_count_with_scale(track, ScaleMode::Chromatic)
+}
+
+/// Same as `row_count` but honoring a scale mode (diatonic rows only).
+pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
     if track.notes.is_empty() {
         return 0;
     }
@@ -351,7 +453,16 @@ pub fn row_count(track: &ParsedTrack) -> usize {
     let max_p = *pitches.iter().max().unwrap();
     let lo = min_p.saturating_sub(1);
     let hi = max_p.saturating_add(1);
-    hi as usize - lo as usize + 1
+    let scale_mask = match mode {
+        ScaleMode::Chromatic => None,
+        ScaleMode::Diatonic(m) => Some(m),
+    };
+    (lo..=hi)
+        .filter(|&p| {
+            let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
+            in_scale || p == min_p || p == max_p
+        })
+        .count()
 }
 
 /// Count grid columns for a timeline (shared util for mouse mapping).

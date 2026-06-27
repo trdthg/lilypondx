@@ -25,6 +25,8 @@ pub struct App {
     pub player: Option<AudioPlayer>,
     parsed_cache: Vec<(String, ParsedTrack)>,
     cache_dirty: bool,
+    /// Cached MIDI events + tempo so resume_playback doesn't recompile.
+    cached_events: Option<(Vec<crate::audio::MidiEvent>, u32)>,
     /// Last playback progress captured before stop (so it doesn't jump to 0).
     final_progress: f64,
     pub reload_error: Option<String>,
@@ -38,6 +40,10 @@ pub struct App {
     pub total_cols: usize,
     /// Horizontal scroll offset (in grid columns) for the sparkline area.
     pub scroll_offset: usize,
+    /// Which pitch rows to show in the sparkline.
+    pub scale_mode: sparkline::ScaleMode,
+    /// The CLI `--scale` argument (stored for recomputing on reload).
+    pub scale_arg: String,
 }
 
 impl App {
@@ -47,6 +53,7 @@ impl App {
             player: None,
             parsed_cache: Vec::new(),
             cache_dirty: true,
+            cached_events: None,
             final_progress: 0.0,
             reload_error: None,
             hover_col: None,
@@ -54,6 +61,8 @@ impl App {
             track_rects: Vec::new(),
             total_cols: 0,
             scroll_offset: 0,
+            scale_mode: sparkline::ScaleMode::Chromatic,
+            scale_arg: String::from("auto"),
         }
     }
 
@@ -76,6 +85,7 @@ impl App {
     pub fn start_playback(&mut self) -> Result<(), LilypondxError> {
         self.stop_playback();
         let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+        self.cached_events = Some((events.clone(), tempo_bpm));
         if events.is_empty() {
             return Ok(());
         }
@@ -88,13 +98,18 @@ impl App {
 
     /// Resume playback from the paused position (final_progress).
     pub fn resume_playback(&mut self) -> Result<(), LilypondxError> {
-        let fraction = self.final_progress;
-        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
+            cached.clone()
+        } else {
+            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+            self.cached_events = Some((ev.clone(), bpm));
+            (ev, bpm)
+        };
         if events.is_empty() {
             return Ok(());
         }
         let total = events.iter().map(|e| e.tick).max().unwrap_or(0);
-        let target_tick = ((fraction.clamp(0.0, 1.0) * total as f64).round() as u64).min(total);
+        let target_tick = ((self.final_progress.clamp(0.0, 1.0) * total as f64).round() as u64).min(total);
         let player = AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
         player.play_background_from(target_tick)?;
         self.player = Some(player);
@@ -123,12 +138,19 @@ impl App {
     pub fn set_score(&mut self, score: Score) {
         self.score = score;
         self.cache_dirty = true;
+        self.cached_events = None;
     }
 
     /// Seek to a fractional position; restart playback from there.
     pub fn seek(&mut self, fraction: f64) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
+            cached.clone()
+        } else {
+            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+            self.cached_events = Some((ev.clone(), bpm));
+            (ev, bpm)
+        };
         if events.is_empty() {
             return Ok(());
         }
@@ -178,9 +200,11 @@ impl Drop for TerminalGuard {
 }
 
 /// Run the TUI watch loop. Blocks until the user quits.
-pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), LilypondxError> {
+pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Result<(), LilypondxError> {
     let score = parser::parse_markdown(&file)?;
     let mut app = App::new(score);
+    app.scale_arg = scale.clone();
+    app.scale_mode = resolve_scale_mode(&app.score, &scale);
     app.start_playback()?;
 
     term::enable_raw_mode().map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
@@ -274,10 +298,10 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
                 },
                 Event::Mouse(MouseEvent { kind, column, row, .. }) => match kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.scroll_offset);
+                        app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset);
                     }
                     MouseEventKind::Down(_) => {
-                        if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.scroll_offset) {
+                        if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset) {
                             let frac = if app.total_cols > 0 {
                                 col as f64 / app.total_cols as f64
                             } else {
@@ -313,6 +337,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
                     app.reload_error = None;
                     app.scroll_offset = 0;
                     app.set_score(new_score);
+                    app.scale_mode = resolve_scale_mode(&app.score, &app.scale_arg);
                     let _ = app.start_playback();
                     needs_redraw = true;
                 }
@@ -357,19 +382,51 @@ fn clamp_scroll(app: &mut App) {
     app.scroll_offset = app.scroll_offset.min(max);
 }
 
-fn screen_x_to_col(x: u16, y: u16, track_rects: &[Rect], scroll_offset: usize) -> Option<usize> {
+fn screen_x_to_col(x: u16, y: u16, track_rects: &[Rect], grid_rect: Rect, scroll_offset: usize) -> Option<usize> {
     // Only respond to clicks inside a framed track area.
     if !track_rects.iter().any(|r| y >= r.y && y < r.y + r.height) {
         return None;
     }
-    if track_rects.is_empty() {
+    // Use grid_rect (label gutter end + border offset) for x mapping.
+    if x < grid_rect.x || x >= grid_rect.x + grid_rect.width {
         return None;
     }
-    let r = &track_rects[0];
-    if x < r.x || x >= r.x + r.width {
-        return None;
+    Some((x - grid_rect.x) as usize + scroll_offset)
+}
+
+/// Resolve the `--scale` CLI argument into a `ScaleMode`.
+/// - "auto": detect from frontmatter `key`, or infer from notes.
+/// - "chromatic": show all rows.
+/// - key string like "c major": parse and use that scale.
+fn resolve_scale_mode(score: &Score, arg: &str) -> sparkline::ScaleMode {
+    match arg.trim() {
+        "chromatic" => sparkline::ScaleMode::Chromatic,
+        "auto" => {
+            // 1. Try frontmatter `key`.
+            if let Some(k) = &score.metadata.key {
+                if let Some(mode) = sparkline::parse_key(k) {
+                    return mode;
+                }
+            }
+            // 2. Auto-detect from all tracks' pitches.
+            let parsed: Vec<crate::note::ParsedTrack> = score
+                .tracks
+                .iter()
+                .map(|t| note::parse_notes_relative(&t.notes, &t.relative, TICKS_PER_BEAT))
+                .collect();
+            // Combine all pitches and detect.
+            let combined = crate::note::ParsedTrack {
+                notes: parsed.iter().flat_map(|p| p.notes.iter().cloned()).collect(),
+                total_ticks: parsed.iter().map(|p| p.total_ticks).max().unwrap_or(0),
+            };
+            sparkline::detect_scale(&combined)
+                .map(|(_, mask, _)| sparkline::ScaleMode::Diatonic(mask))
+                .unwrap_or(sparkline::ScaleMode::Chromatic)
+        }
+        key_str => {
+            sparkline::parse_key(key_str).unwrap_or(sparkline::ScaleMode::Chromatic)
+        }
     }
-    Some((x - r.x) as usize + scroll_offset)
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App) {
@@ -434,6 +491,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
     app.grid_rect.width = visible_width as u16;
     clamp_scroll(app);
     let scroll_offset = app.scroll_offset;
+    let scale_mode = app.scale_mode;
 
     let row_counts: Vec<usize> = visible
         .iter()
@@ -441,7 +499,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             parsed_snapshot
                 .iter()
                 .find(|(n, _)| n == name)
-                .map_or(0, |(_, t)| sparkline::row_count(t))
+                .map_or(0, |(_, t)| sparkline::row_count_with_scale(t, scale_mode))
         })
         .collect();
 
@@ -485,6 +543,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             total_ticks_override: shared_total_ticks,
             hover_col: app.hover_col,
             show_progress_bar: i == n_visible - 1,
+            scale_mode,
         };
         let (text, _) = sparkline::render_sparkline_widget(parsed_track, &config, scroll_offset, visible_width);
 
