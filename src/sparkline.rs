@@ -326,12 +326,12 @@ pub fn render_sparkline_widget<'a>(
 /// terminal background.
 fn bg_color(midi: u8) -> Color {
     match midi % 12 {
-        0 | 1 => Color::Rgb(120, 140, 180),  // C  — soft slate blue
-        2 | 3 => Color::Rgb(180, 130, 144),  // D  — soft rose
+        0 => Color::Rgb(120, 140, 180),  // C  — soft slate blue
+        2 => Color::Rgb(180, 130, 144),  // D  — soft rose
         4 => Color::Rgb(140, 172, 124),      // E  — soft sage
-        5 | 6 => Color::Rgb(176, 148, 104),  // F  — soft amber
-        7 | 8 => Color::Rgb(124, 160, 168),  // G  — soft teal
-        9 | 10 => Color::Rgb(160, 128, 176), // A  — soft lavender
+        5 => Color::Rgb(176, 148, 104),  // F  — soft amber
+        7 => Color::Rgb(124, 160, 168),  // G  — soft teal
+        9 => Color::Rgb(160, 128, 176), // A  — soft lavender
         11 => Color::Rgb(140, 140, 148),      // B  — soft neutral gray
         _ => Color::Reset,
     }

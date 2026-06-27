@@ -32,6 +32,8 @@ pub struct App {
     pub hover_col: Option<usize>,
     /// Screen rect of the grid area: x = left edge, width = total_cols.
     pub grid_rect: Rect,
+    /// Y ranges of each framed track (for mouse hit-testing).
+    pub track_rects: Vec<Rect>,
     /// Total grid columns (cached for mouse mapping).
     pub total_cols: usize,
     /// Horizontal scroll offset (in grid columns) for the sparkline area.
@@ -49,6 +51,7 @@ impl App {
             reload_error: None,
             hover_col: None,
             grid_rect: Rect::ZERO,
+            track_rects: Vec::new(),
             total_cols: 0,
             scroll_offset: 0,
         }
@@ -269,12 +272,12 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
                     }
                     _ => {}
                 },
-                Event::Mouse(MouseEvent { kind, column, .. }) => match kind {
+                Event::Mouse(MouseEvent { kind, column, row, .. }) => match kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        app.hover_col = screen_x_to_col(column, app.grid_rect, app.scroll_offset);
+                        app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.scroll_offset);
                     }
                     MouseEventKind::Down(_) => {
-                        if let Some(col) = screen_x_to_col(column, app.grid_rect, app.scroll_offset) {
+                        if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.scroll_offset) {
                             let frac = if app.total_cols > 0 {
                                 col as f64 / app.total_cols as f64
                             } else {
@@ -354,11 +357,19 @@ fn clamp_scroll(app: &mut App) {
     app.scroll_offset = app.scroll_offset.min(max);
 }
 
-fn screen_x_to_col(x: u16, grid_rect: Rect, scroll_offset: usize) -> Option<usize> {
-    if x < grid_rect.x || x >= grid_rect.x + grid_rect.width {
+fn screen_x_to_col(x: u16, y: u16, track_rects: &[Rect], scroll_offset: usize) -> Option<usize> {
+    // Only respond to clicks inside a framed track area.
+    if !track_rects.iter().any(|r| y >= r.y && y < r.y + r.height) {
         return None;
     }
-    Some((x - grid_rect.x) as usize + scroll_offset)
+    if track_rects.is_empty() {
+        return None;
+    }
+    let r = &track_rects[0];
+    if x < r.x || x >= r.x + r.width {
+        return None;
+    }
+    Some((x - r.x) as usize + scroll_offset)
 }
 
 fn draw_ui(f: &mut Frame, app: &mut App) {
@@ -418,7 +429,8 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
     let shared_total_ticks = parsed_snapshot.iter().map(|(_, t)| t.total_ticks).max();
     let total_cols = shared_total_ticks.map_or(0, |t| sparkline::total_cols(t, beats_per_bar));
     app.total_cols = total_cols;
-    let visible_width = total_cols.min(area.width.saturating_sub(GRID_X_OFFSET) as usize);
+    // Reserve 2 for left/right border + GRID_X_OFFSET for the label gutter.
+    let visible_width = total_cols.min(area.width.saturating_sub(GRID_X_OFFSET + 2) as usize);
     app.grid_rect.width = visible_width as u16;
     clamp_scroll(app);
     let scroll_offset = app.scroll_offset;
@@ -433,12 +445,13 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    // Build layout constraints: track rows with 1-row `*` separators between them.
+    // Each track is bordered (2 rows for top/bottom border) plus optional
+    // 1-row separator between tracks.
     let mut constraints: Vec<Constraint> = Vec::new();
     for (i, &r) in row_counts.iter().enumerate() {
-        constraints.push(Constraint::Length(r as u16));
+        constraints.push(Constraint::Length((r + 2) as u16)); // +2 for borders
         if i + 1 < row_counts.len() {
-            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(1)); // separator
         }
     }
     let track_areas = Layout::default()
@@ -447,16 +460,24 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         .split(area);
 
     let n_visible = visible.len();
+    let mut track_rects: Vec<Rect> = Vec::new();
     let mut area_idx = 0;
     for (i, (name, _clef)) in visible.iter().enumerate() {
         if area_idx >= track_areas.len() {
             break;
         }
-        let track_area = track_areas[area_idx];
+        let track_outer = track_areas[area_idx];
         area_idx += 1;
 
         let parsed_track = parsed_snapshot.iter().find(|(n, _)| n == name);
         let Some((_, parsed_track)) = parsed_track else { continue };
+
+        // Border around this track.
+        let border_block = Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::DarkGray));
+        let track_inner = border_block.inner(track_outer);
+        f.render_widget(border_block, track_outer);
 
         let config = SparklineConfig {
             progress: Some(progress),
@@ -467,21 +488,25 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         };
         let (text, _) = sparkline::render_sparkline_widget(parsed_track, &config, scroll_offset, visible_width);
 
+        // Record the grid rect for mouse mapping (use inner area).
+        let grid_rect = Rect {
+            x: track_inner.x + GRID_X_OFFSET,
+            y: track_inner.y,
+            width: visible_width as u16,
+            height: track_inner.height,
+        };
+        track_rects.push(track_inner);
+
         if i == 0 {
-            app.grid_rect = Rect {
-                x: track_area.x + GRID_X_OFFSET,
-                y: track_area.y,
-                width: visible_width as u16,
-                height: track_area.height,
-            };
+            app.grid_rect = grid_rect;
         }
 
-        let block = Block::default()
-            .borders(Borders::NONE)
-            .style(Style::default().fg(Color::Gray));
-        f.render_widget(Paragraph::new(text).block(block), track_area);
+        f.render_widget(
+            Paragraph::new(text).style(Style::default().fg(Color::Gray)),
+            track_inner,
+        );
 
-        // Draw separator line between tracks (not after the last one).
+        // Separator line between tracks.
         if i + 1 < n_visible && area_idx < track_areas.len() {
             let sep_area = track_areas[area_idx];
             area_idx += 1;
@@ -492,6 +517,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             );
         }
     }
+    app.track_rects = track_rects;
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &mut App) {
