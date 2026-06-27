@@ -1,9 +1,9 @@
-/// A parsed musical note with absolute pitch and duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A parsed musical note with absolute pitch(es) and duration.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
-    /// Absolute pitch as MIDI note number (C4 = 60, each semitone ±1).
-    /// `None` for rests.
-    pub pitch: Option<u8>,
+    /// Absolute pitches as MIDI note numbers (C4 = 60, each semitone ±1).
+    /// Empty for rests. Multiple entries = chord (simultaneous notes).
+    pub pitches: Vec<u8>,
     /// Duration in ticks. Quarter note = `ticks_per_beat`.
     pub duration: u32,
     /// Whether a tie starts from this note (glues to next note).
@@ -92,25 +92,43 @@ fn parse_notes_impl(
                 chars.next();
                 let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
                 default_duration = dur;
-                notes.push(Note { pitch: None, duration: dur, tie: false });
+                notes.push(Note { pitches: Vec::new(), duration: dur, tie: false });
                 current_tick += dur as u64;
             }
             '<' => {
                 chars.next();
+                // Collect all pitches inside <...>
+                let mut chord_pitches: Vec<u8> = Vec::new();
                 while let Some(&c) = chars.peek() {
-                    chars.next();
                     if c == '>' {
+                        chars.next();
                         break;
                     }
+                    if matches!(c, 'a'..='g') {
+                        let (raw_pitch, octave_shift) = parse_pitch_with_octave(&mut chars, relative);
+                        let pitch = if relative {
+                            relative_pitch(raw_pitch, octave_shift, prev_pitch)
+                        } else {
+                            raw_pitch
+                        };
+                        chord_pitches.push(pitch);
+                        prev_pitch = pitch;
+                    } else {
+                        chars.next();
+                    }
                 }
-                if let Some(&c) = chars.peek()
-                    && c.is_ascii_digit()
-                {
-                    let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
-                    default_duration = dur;
-                    notes.push(Note { pitch: Some(prev_pitch), duration: dur, tie: false });
-                    current_tick += dur as u64;
+                if chord_pitches.is_empty() {
+                    chord_pitches.push(prev_pitch);
                 }
+                let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
+                default_duration = dur;
+                let mut tie = false;
+                if let Some(&'~') = chars.peek() {
+                    chars.next();
+                    tie = true;
+                }
+                notes.push(Note { pitches: chord_pitches, duration: dur, tie });
+                current_tick += dur as u64;
             }
             'a'..='g' => {
                 let (raw_pitch, octave_shift) = parse_pitch_with_octave(&mut chars, relative);
@@ -128,7 +146,7 @@ fn parse_notes_impl(
                     tie = true;
                 }
 
-                notes.push(Note { pitch: Some(pitch), duration: dur, tie });
+                notes.push(Note { pitches: vec![pitch], duration: dur, tie });
                 prev_pitch = pitch;
                 current_tick += dur as u64;
             }
@@ -306,14 +324,18 @@ fn skip_command(chars: &mut std::iter::Peekable<std::str::Chars>) {
 
 /// Serialize parsed notes to a compact test-friendly format:
 /// `PITCH,DURATION` per note, space-separated. `R` for rests, `~` suffix for ties.
+/// Chords are serialized as `[p1+p2+p3],DURATION`.
 pub fn serialize_notes(track: &ParsedTrack) -> String {
     track
         .notes
         .iter()
         .map(|n| {
-            let pitch = match n.pitch {
-                Some(p) => p.to_string(),
-                None => "R".into(),
+            let pitch = if n.pitches.is_empty() {
+                "R".into()
+            } else if n.pitches.len() == 1 {
+                n.pitches[0].to_string()
+            } else {
+                format!("[{}]", n.pitches.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("+"))
             };
             let tie = if n.tie { "~" } else { "" };
             format!("{pitch},{}{tie}", n.duration)

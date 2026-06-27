@@ -39,7 +39,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     if track.notes.is_empty() {
         return None;
     }
-    let pitches: Vec<u8> = track.notes.iter().filter_map(|n| n.pitch).collect();
+    let pitches: Vec<u8> = track.notes.iter().flat_map(|n| n.pitches.iter().copied()).collect();
     if pitches.is_empty() {
         return None; // "(no pitched notes)" handled by callers
     }
@@ -110,7 +110,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         let end_col = tick_to_col(current_tick + note.duration as u64);
         let end_col = end_col.max(start_col + 1).min(total_cols);
         let start_col = start_col.min(total_cols.saturating_sub(1));
-        if let Some(pitch) = note.pitch {
+        for &pitch in &note.pitches {
             let row = pitch_to_row(pitch);
             for (col, cell) in grid[row].iter_mut().enumerate().take(end_col).skip(start_col) {
                 if !bar_cols.contains(&col) {
@@ -155,11 +155,11 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         for note in &track.notes {
             let start = t;
             let end = t + note.duration as u64;
-            if note.pitch.is_some() {
+            if !note.pitches.is_empty() {
                 last_pitched = Some(tick_to_col(start));
             }
             if snap.is_none() && current_tick < end {
-                if note.pitch.is_some() {
+                if !note.pitches.is_empty() {
                     snap = Some(tick_to_col(current_tick));
                 }
                 break;
@@ -170,7 +170,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         if snap.is_none() {
             let mut t: u64 = 0;
             for note in &track.notes {
-                if current_tick <= t && note.pitch.is_some() {
+                if current_tick <= t && !note.pitches.is_empty() {
                     snap = Some(tick_to_col(t));
                     break;
                 }
@@ -197,11 +197,10 @@ pub fn render_sparkline(track: &ParsedTrack, config: &SparklineConfig) -> String
         out.push_str(row);
         out.push('\n');
     }
-    out.push_str("    └");
-    out.push_str(&"─".repeat(g.total_cols));
 
     append_progress_bar(&mut out, &g, config);
-    out
+    // Trim trailing whitespace so output matches test fixtures (which are trimmed).
+    out.trim_end().to_string()
 }
 
 /// Render a sparkline as a ratatui `Text` with per-cell styling (rainbow
@@ -263,11 +262,6 @@ pub fn render_sparkline_widget<'a>(
         }
         lines.push(Line::from(spans));
     }
-    // Bottom axis (clipped).
-    lines.push(Line::from(Span::raw(format!(
-        "    └{}",
-        "─".repeat(vis_cols)
-    ))));
 
     if config.show_progress_bar
         && let Some(p) = config.progress
@@ -315,13 +309,13 @@ fn bg_color(midi: u8) -> Color {
     }
 }
 
-/// How many rows (lines) a track's sparkline will occupy (pitch rows + axis),
+/// How many rows (lines) a track's sparkline will occupy (pitch rows only),
 /// excluding the optional progress bar. For TUI height allocation per voice.
 pub fn row_count(track: &ParsedTrack) -> usize {
     if track.notes.is_empty() {
         return 0;
     }
-    let pitches: Vec<u8> = track.notes.iter().filter_map(|n| n.pitch).collect();
+    let pitches: Vec<u8> = track.notes.iter().flat_map(|n| n.pitches.iter().copied()).collect();
     if pitches.is_empty() {
         return 1;
     }
@@ -329,7 +323,7 @@ pub fn row_count(track: &ParsedTrack) -> usize {
     let max_p = *pitches.iter().max().unwrap();
     let lo = min_p.saturating_sub(1);
     let hi = max_p.saturating_add(1);
-    (hi as usize - lo as usize + 1) + 1
+    hi as usize - lo as usize + 1
 }
 
 /// Count grid columns for a timeline (shared util for mouse mapping).

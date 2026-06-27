@@ -83,6 +83,21 @@ impl App {
         Ok(())
     }
 
+    /// Resume playback from the paused position (final_progress).
+    pub fn resume_playback(&mut self) -> Result<(), LilypondxError> {
+        let fraction = self.final_progress;
+        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+        if events.is_empty() {
+            return Ok(());
+        }
+        let total = events.iter().map(|e| e.tick).max().unwrap_or(0);
+        let target_tick = ((fraction.clamp(0.0, 1.0) * total as f64).round() as u64).min(total);
+        let player = AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
+        player.play_background_from(target_tick)?;
+        self.player = Some(player);
+        Ok(())
+    }
+
     pub fn stop_playback(&mut self) {
         if let Some(p) = &self.player {
             self.final_progress = p.progress();
@@ -221,8 +236,10 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize) -> Result<(), Lilypon
                     KeyCode::Char(' ') => {
                         if app.is_playing() {
                             app.stop_playback();
-                        } else {
+                        } else if app.final_progress >= 1.0 {
                             let _ = app.start_playback();
+                        } else {
+                            let _ = app.resume_playback();
                         }
                         needs_redraw = true;
                     }
@@ -416,21 +433,28 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
+    // Build layout constraints: track rows with 1-row `*` separators between them.
+    let mut constraints: Vec<Constraint> = Vec::new();
+    for (i, &r) in row_counts.iter().enumerate() {
+        constraints.push(Constraint::Length(r as u16));
+        if i + 1 < row_counts.len() {
+            constraints.push(Constraint::Length(1));
+        }
+    }
     let track_areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(
-            row_counts
-                .iter()
-                .map(|&r| Constraint::Length(r as u16))
-                .collect::<Vec<_>>(),
-        )
+        .constraints(constraints)
         .split(area);
 
     let n_visible = visible.len();
+    let mut area_idx = 0;
     for (i, (name, _clef)) in visible.iter().enumerate() {
-        if i >= track_areas.len() {
+        if area_idx >= track_areas.len() {
             break;
         }
+        let track_area = track_areas[area_idx];
+        area_idx += 1;
+
         let parsed_track = parsed_snapshot.iter().find(|(n, _)| n == name);
         let Some((_, parsed_track)) = parsed_track else { continue };
 
@@ -445,17 +469,28 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
 
         if i == 0 {
             app.grid_rect = Rect {
-                x: track_areas[i].x + GRID_X_OFFSET,
-                y: track_areas[i].y,
+                x: track_area.x + GRID_X_OFFSET,
+                y: track_area.y,
                 width: visible_width as u16,
-                height: track_areas[i].height,
+                height: track_area.height,
             };
         }
 
         let block = Block::default()
             .borders(Borders::NONE)
             .style(Style::default().fg(Color::Gray));
-        f.render_widget(Paragraph::new(text).block(block), track_areas[i]);
+        f.render_widget(Paragraph::new(text).block(block), track_area);
+
+        // Draw separator line between tracks (not after the last one).
+        if i + 1 < n_visible && area_idx < track_areas.len() {
+            let sep_area = track_areas[area_idx];
+            area_idx += 1;
+            let sep: String = "*".repeat(sep_area.width as usize);
+            f.render_widget(
+                Paragraph::new(sep).style(Style::default().fg(Color::DarkGray)),
+                sep_area,
+            );
+        }
     }
 }
 

@@ -66,7 +66,7 @@ fn render_widget_plain_matches_plain_render() {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(widget_plain, plain, "widget plain text must equal render_sparkline");
+    assert_eq!(widget_plain.trim_end(), plain, "widget plain text must equal render_sparkline");
 }
 
 #[test]

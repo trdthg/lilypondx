@@ -39,7 +39,7 @@ pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEv
 
         let mut current_tick: u64 = 0;
         for n in &parsed.notes {
-            if let Some(pitch) = n.pitch {
+            for &pitch in &n.pitches {
                 events.push(MidiEvent {
                     tick: current_tick, channel, command: 0x90, data1: pitch, data2: 80,
                 });
