@@ -467,6 +467,86 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(text).block(block), area);
 }
 
+/// Draw the top border of a track, with the track name at the start and
+/// optional bar numbers (first track only).
+fn draw_track_top_border(
+    f: &mut Frame,
+    area: Rect,
+    track_name: &str,
+    show_bar_numbers: bool,
+    beats_per_bar: Option<u32>,
+    total_ticks: Option<u64>,
+    visible_width: usize,
+    scroll_offset: usize,
+) {
+    let line_width = area.width.saturating_sub(2) as usize;
+    let mut buf: Vec<char> = vec!['─'; line_width];
+
+    // Insert track name at the beginning: `─ RH ─`.
+    let label = format!(" {} ", track_name);
+    for (i, c) in label.chars().enumerate() {
+        if i < line_width {
+            buf[i] = c;
+        }
+    }
+
+    // Bar numbers (first track only).
+    if show_bar_numbers {
+        if let (Some(bpb), Some(total)) = (beats_per_bar, total_ticks) {
+            if bpb > 0 && total > 0 {
+                let tpc = TICKS_PER_BEAT as u64 / 2;
+                let bar_len = bpb as u64 * TICKS_PER_BEAT as u64;
+                let bar_ticks: Vec<u64> = {
+                    let mut v = Vec::new();
+                    let mut t = bar_len;
+                    while t < total {
+                        v.push(t);
+                        t += bar_len;
+                    }
+                    v
+                };
+                for (i, &bt) in bar_ticks.iter().enumerate() {
+                    let bar_number = (i + 2) as usize;
+                    if bar_number % 4 != 0 {
+                        continue;
+                    }
+                    let base = (bt / tpc) as usize;
+                    let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
+                    let col = base + bars_before;
+                    if col < scroll_offset || col >= scroll_offset + visible_width {
+                        continue;
+                    }
+                    let vis_col = col - scroll_offset;
+                    let pos = GRID_X_OFFSET as usize + vis_col;
+                    let num_str = bar_number.to_string();
+                    let num_len = num_str.len();
+                    for (offset, digit) in num_str.chars().rev().enumerate() {
+                        let p = pos.saturating_sub(offset);
+                        if p < line_width {
+                            buf[p] = digit;
+                        }
+                    }
+                    let before = pos.saturating_sub(num_len);
+                    if before < line_width {
+                        buf[before] = ' ';
+                    }
+                    let after = pos + 1;
+                    if after < line_width {
+                        buf[after] = ' ';
+                    }
+                }
+            }
+        }
+    }
+
+    let line: String = buf.iter().collect();
+    let border = format!("┌{line}┐");
+    f.render_widget(
+        Paragraph::new(border).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
 fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
     let visible: Vec<(String, String)> = app
         .score
@@ -503,14 +583,12 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
-    // Each track is bordered (2 rows for top/bottom border) plus optional
-    // 1-row separator between tracks.
+    // Each track is bordered (2 rows for top/bottom border + r content rows).
+    // No separator lines between tracks — the borders themselves visually
+    // separate adjacent tracks.
     let mut constraints: Vec<Constraint> = Vec::new();
-    for (i, &r) in row_counts.iter().enumerate() {
+    for &r in row_counts.iter() {
         constraints.push(Constraint::Length((r + 2) as u16)); // +2 for borders
-        if i + 1 < row_counts.len() {
-            constraints.push(Constraint::Length(1)); // separator
-        }
     }
     let track_areas = Layout::default()
         .direction(Direction::Vertical)
@@ -519,23 +597,46 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
 
     let n_visible = visible.len();
     let mut track_rects: Vec<Rect> = Vec::new();
-    let mut area_idx = 0;
     for (i, (name, _clef)) in visible.iter().enumerate() {
-        if area_idx >= track_areas.len() {
+        if i >= track_areas.len() {
             break;
         }
-        let track_outer = track_areas[area_idx];
-        area_idx += 1;
+        let track_outer = track_areas[i];
 
         let parsed_track = parsed_snapshot.iter().find(|(n, _)| n == name);
         let Some((_, parsed_track)) = parsed_track else { continue };
 
-        // Border around this track.
+        // All tracks: draw left/right/bottom borders, custom top border.
         let border_block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .style(Style::default().fg(Color::DarkGray));
-        let track_inner = border_block.inner(track_outer);
+        let track_inner_raw = border_block.inner(track_outer);
         f.render_widget(border_block, track_outer);
+
+        // Custom top border with track name (+ bar numbers for first track).
+        let top_rect = Rect {
+            x: track_outer.x,
+            y: track_outer.y,
+            width: track_outer.width,
+            height: 1,
+        };
+        draw_track_top_border(
+            f,
+            top_rect,
+            name,
+            i == 0,
+            beats_per_bar,
+            shared_total_ticks,
+            visible_width,
+            scroll_offset,
+        );
+
+        // Skip the top-border row in the inner area.
+        let track_inner = Rect {
+            y: track_inner_raw.y + 1,
+            height: track_inner_raw.height.saturating_sub(1),
+            ..track_inner_raw
+        };
 
         let config = SparklineConfig {
             progress: Some(progress),
@@ -564,17 +665,6 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             Paragraph::new(text).style(Style::default().fg(Color::Gray)),
             track_inner,
         );
-
-        // Separator line between tracks.
-        if i + 1 < n_visible && area_idx < track_areas.len() {
-            let sep_area = track_areas[area_idx];
-            area_idx += 1;
-            let sep: String = "*".repeat(sep_area.width as usize);
-            f.render_widget(
-                Paragraph::new(sep).style(Style::default().fg(Color::DarkGray)),
-                sep_area,
-            );
-        }
     }
     app.track_rects = track_rects;
 }
