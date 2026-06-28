@@ -10,6 +10,8 @@ pub struct Note {
     pub tie: bool,
     /// Absolute start tick (when this note begins).
     pub start_tick: u64,
+    /// Staccato articulation (shorten note-off to ~50% of duration).
+    pub staccato: bool,
 }
 
 /// Result of parsing a single track's notes.
@@ -94,7 +96,7 @@ fn parse_notes_impl(
                 chars.next();
                 let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
                 default_duration = dur;
-                notes.push(Note { pitches: Vec::new(), duration: dur, tie: false, start_tick: current_tick });
+                notes.push(Note { pitches: Vec::new(), duration: dur, tie: false, start_tick: current_tick, staccato: false });
                 current_tick += dur as u64;
             }
             '<' => {
@@ -136,7 +138,8 @@ fn parse_notes_impl(
                     chars.next();
                     tie = true;
                 }
-                notes.push(Note { pitches: chord_pitches, duration: dur, tie, start_tick: current_tick });
+                let staccato = parse_staccato(&mut chars);
+                notes.push(Note { pitches: chord_pitches, duration: dur, tie, start_tick: current_tick, staccato });
                 current_tick += dur as u64;
             }
             'a'..='g' => {
@@ -154,8 +157,9 @@ fn parse_notes_impl(
                     chars.next();
                     tie = true;
                 }
+                let staccato = parse_staccato(&mut chars);
 
-                notes.push(Note { pitches: vec![pitch], duration: dur, tie, start_tick: current_tick });
+                notes.push(Note { pitches: vec![pitch], duration: dur, tie, start_tick: current_tick, staccato });
                 prev_pitch = pitch;
                 current_tick += dur as u64;
             }
@@ -257,7 +261,10 @@ fn relative_pitch(raw_pitch: u8, octave_shift: i32, prev_pitch: u8) -> u8 {
     let mut best = raw_pitch;
     let mut best_dist = (raw_pitch as i32 - prev_pitch as i32).unsigned_abs();
 
-    for &oct_offset in &[-12i32, 12, -24, 24] {
+    // Try octave shifts up to ±3 (36 semitones) to find the closest pitch.
+    // LilyPond's rule is "interval less than a fifth" which can require
+    // shifting up to 3 octaves in extreme cases.
+    for &oct_offset in &[-48i32, -36, -24, -12, 12, 24, 36, 48] {
         let candidate = ((raw_pitch as i32) + oct_offset).clamp(0, 127) as u8;
         let dist = (candidate as i32 - prev_pitch as i32).unsigned_abs();
         if dist < best_dist {
@@ -267,6 +274,18 @@ fn relative_pitch(raw_pitch: u8, octave_shift: i32, prev_pitch: u8) -> u8 {
     }
 
     ((best as i32) + octave_shift * 12).clamp(0, 127) as u8
+}
+
+/// Check for staccato articulation `-.` after a note/chord.
+fn parse_staccato(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+    let mut peek = chars.clone();
+    if peek.next() == Some('-') && peek.next() == Some('.') {
+        chars.next();
+        chars.next();
+        true
+    } else {
+        false
+    }
 }
 
 /// Parse a duration number (and optional dots) after a note.
@@ -387,6 +406,7 @@ pub fn midi_events_to_parsed_track(events: &[crate::audio::MidiEvent]) -> Parsed
             duration,
             tie: false,
             start_tick: start,
+            staccato: false,
         });
     }
 

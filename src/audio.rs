@@ -30,6 +30,7 @@ pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEv
 
     // ── lilypondx tracks: internal parser ──────────────────────────────
     let lx_tracks: Vec<_> = score.tracks.iter().filter(|t| t.syntax == "lilypondx").collect();
+    let transpose = score.metadata.transpose.unwrap_or(0);
     for (ch, track) in lx_tracks.iter().enumerate() {
         let channel = ch as u8;
         let parsed = note::parse_notes_relative(&track.notes, &track.relative, ticks_per_beat);
@@ -39,15 +40,22 @@ pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEv
 
         for n in &parsed.notes {
             let start = n.start_tick;
+            // Staccato: shorten note-off to ~50% of duration.
+            let off_tick = if n.staccato {
+                start + (n.duration as u64 / 2)
+            } else {
+                start + n.duration as u64
+            };
             for &pitch in &n.pitches {
+                let tpitch = (pitch as i32 + transpose).clamp(0, 127) as u8;
                 events.push(MidiEvent {
-                    tick: start, channel, command: 0x90, data1: pitch, data2: 80,
+                    tick: start, channel, command: 0x90, data1: tpitch, data2: 80,
                 });
                 events.push(MidiEvent {
-                    tick: start + n.duration as u64,
+                    tick: off_tick,
                     channel,
                     command: 0x80,
-                    data1: pitch,
+                    data1: tpitch,
                     data2: 64,
                 });
             }
