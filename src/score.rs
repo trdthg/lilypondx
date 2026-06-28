@@ -22,6 +22,9 @@ pub struct ScoreMetadata {
     /// Generate guitar tablature (TabStaff) alongside standard notation.
     #[serde(default)]
     pub tablature: bool,
+    /// Part layout: "split" (each track separate) or "combined" (one staff).
+    #[serde(default)]
+    pub parts: Option<String>,
 }
 
 #[derive(Debug, Clone)]

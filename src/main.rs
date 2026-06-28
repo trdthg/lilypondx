@@ -53,6 +53,9 @@ enum Command {
         /// Generate guitar tablature (TabStaff) alongside standard notation
         #[arg(short = 'T', long)]
         tablature: bool,
+        /// Part layout: "split" (each track separate) or "combined" (one staff)
+        #[arg(long, default_value = "split")]
+        parts: ExportParts,
     },
 
     /// Dump ASCII sparklines to stdout (one-shot, no TUI).
@@ -94,7 +97,21 @@ enum Command {
         /// Generate guitar tablature (TabStaff) alongside standard notation
         #[arg(short = 'T', long)]
         tablature: bool,
+        /// Watch for file changes and auto-re-export
+        #[arg(short, long)]
+        watch: bool,
+
+        /// Part layout: "split" (each track on its own staff) or "combined"
+        /// (all tracks on one staff, e.g. for solo guitar).
+        #[arg(long, default_value = "split")]
+        parts: ExportParts,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ExportParts {
+    Split,
+    Combined,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -110,10 +127,10 @@ fn main() -> Result<(), LilypondxError> {
     match cli.command {
         Command::Play { file, no_tui, width, no_watch, scale } =>
             cmd_play(&file, no_tui, width.unwrap_or(0), no_watch, scale),
-        Command::Gen { file, output, tablature } => cmd_gen(&file, output, tablature),
+        Command::Gen { file, output, tablature, parts } => cmd_gen(&file, output, tablature, parts),
         Command::Dump { file, rows: _, scale } => cmd_dump(&file, &scale),
         Command::New { file } => cmd_new(file),
-        Command::Export { file, output, format, transpose, tablature } => cmd_export(&file, output, format, transpose, tablature),
+        Command::Export { file, output, format, transpose, tablature, watch, parts } => cmd_export(&file, output, format, transpose, tablature, watch, parts),
     }
 }
 
@@ -190,11 +207,15 @@ fn cmd_play(file: &Path, no_tui: bool, width: usize, no_watch: bool, scale: Stri
     Ok(())
 }
 
-fn cmd_gen(file: &Path, output: Option<PathBuf>, tablature: bool) -> Result<(), LilypondxError> {
+fn cmd_gen(file: &Path, output: Option<PathBuf>, tablature: bool, parts: ExportParts) -> Result<(), LilypondxError> {
     let mut score = parser::parse_markdown(&file.to_string_lossy())?;
     if tablature {
         score.metadata.tablature = true;
     }
+    score.metadata.parts = Some(match parts {
+        ExportParts::Split => "split",
+        ExportParts::Combined => "combined",
+    }.into());
     let ly = ly_gen::generate_ly(&score);
 
     let out_path = output.unwrap_or_else(|| file.with_extension("ly"));
@@ -229,20 +250,66 @@ c1 | c1 | f,1 | g'2 c,2 |
     Ok(())
 }
 
-fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>, tablature: bool) -> Result<(), LilypondxError> {
+fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>, tablature: bool, watch: bool, parts: ExportParts) -> Result<(), LilypondxError> {
+    use notify::Watcher;
+    let parts_str = match parts {
+        ExportParts::Split => "split",
+        ExportParts::Combined => "combined",
+    };
+    if watch {
+        // Watch loop: re-export on file change.
+        let canonical = file.canonicalize()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res
+                && matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
+            {
+                let _ = tx.send(std::time::Instant::now());
+            }
+        })
+        .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
+        watcher
+            .watch(&canonical, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
+
+        // Initial export.
+        export_once(file, &output, &format, transpose, tablature, parts_str)?;
+
+        let debounce = std::time::Duration::from_millis(300);
+        let mut last_change: Option<std::time::Instant> = None;
+        loop {
+            while let Ok(ts) = rx.try_recv() {
+                last_change = Some(ts);
+            }
+            if let Some(ts) = last_change
+                && ts.elapsed() >= debounce
+            {
+                last_change = None;
+                match export_once(file, &output, &format, transpose, tablature, parts_str) {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("Export error: {e}"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    } else {
+        export_once(file, &output, &format, transpose, tablature, parts_str)
+    }
+}
+
+fn export_once(file: &Path, output: &Option<PathBuf>, format: &ExportFormat, transpose: Option<i32>, tablature: bool, parts: &str) -> Result<(), LilypondxError> {
     let mut score = parser::parse_markdown(&file.to_string_lossy())?;
-    // CLI --transpose overrides frontmatter `transpose`
     if transpose.is_some() {
         score.metadata.transpose = transpose;
     }
     if tablature {
         score.metadata.tablature = true;
     }
+    score.metadata.parts = Some(parts.to_string());
     let ly = ly_gen::generate_ly(&score);
 
-    let out_stem = output.unwrap_or_else(|| file.with_extension(""));
+    let out_stem = output.clone().unwrap_or_else(|| file.with_extension(""));
 
-    // Write .ly to a temp dir so LilyPond's collateral doesn't pollute cwd.
     let tmp = tempfile::TempDir::new().map_err(|e| LilypondxError::Io(e))?;
     let ly_path = tmp.path().join("score.ly");
     std::fs::write(&ly_path, &ly)?;

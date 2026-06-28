@@ -68,8 +68,49 @@ pub fn generate_ly(score: &Score) -> String {
 }
 
 /// Write a staff block (layout or MIDI). `layout` controls indentation/structure.
+/// When `parts == "combined"`, all tracks share a single Staff (solo guitar style).
 fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: bool) {
     let tracks: Vec<&Track> = active_tracks(score);
+    let combined = score.metadata.parts.as_deref() == Some("combined");
+
+    if combined && tracks.len() > 1 {
+        // Combined: all tracks on one staff (<< t1 t2 >>).
+        if layout {
+            if tablature {
+                out.push_str("  \\new StaffGroup <<\n");
+                out.push_str("    \\new Staff = \"combined\" << ");
+                for t in &tracks {
+                    out.push_str(&format!("\\{} ", t.name));
+                }
+                out.push_str(">>\n");
+                out.push_str("    \\new TabStaff = \"combined_tab\" << ");
+                for t in &tracks {
+                    out.push_str(&format!("\\{} ", t.name));
+                }
+                out.push_str(">>\n");
+                out.push_str("  >>\n");
+            } else {
+                out.push_str("  \\new Staff = \"combined\" << ");
+                for t in &tracks {
+                    out.push_str(&format!("\\{} ", t.name));
+                }
+                out.push_str(">>\n");
+            }
+        } else {
+            let inst = tracks[0].midi_instrument.as_deref().unwrap_or("acoustic grand");
+            out.push_str("  \\new Staff = \"combined\" {\n");
+            out.push_str(&format!("    \\set Staff.midiInstrument = #\"{}\"\n", inst));
+            out.push_str("    << ");
+            for t in &tracks {
+                out.push_str(&format!("\\{} ", t.name));
+            }
+            out.push_str(">>\n");
+            out.push_str("  }\n");
+        }
+        return;
+    }
+
+    // Split (default): each track gets its own staff.
     if layout {
         if tracks.len() == 1 {
             let t = tracks[0];
