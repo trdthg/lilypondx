@@ -177,7 +177,26 @@ fn parse_notes_impl(
         }
     }
 
-    ParsedTrack { notes, total_ticks: current_tick }
+    // Merge tied notes: a2~a8 should become one note with duration 1200.
+    let mut merged: Vec<Note> = Vec::new();
+    let mut i = 0;
+    while i < notes.len() {
+        let mut note = notes[i].clone();
+        while note.tie && i + 1 < notes.len() {
+            let next = &notes[i + 1];
+            if next.pitches == note.pitches {
+                note.duration += next.duration;
+                note.tie = next.tie;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        merged.push(note);
+        i += 1;
+    }
+
+    ParsedTrack { notes: merged, total_ticks: current_tick }
 }
 
 /// Check if 's' or 'r' is a rest start (not part of a word like "ais").

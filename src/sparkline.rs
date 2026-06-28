@@ -164,7 +164,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
 
     let total_ticks = config.total_ticks_override.unwrap_or(track.total_ticks).max(1);
     let ticks_per_beat = TICKS_PER_BEAT as u64;
-    let ticks_per_col = ticks_per_beat / 2; // half-beat per column
+    let ticks_per_col = ticks_per_beat / 4; // quarter-beat per column (16th note = 1 col)
 
     // Bar boundaries (in ticks). Each gets a dedicated extra column in the
     // grid, so bar lines don't steal space from notes — every bar still has
@@ -240,9 +240,9 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         && hc < total_cols
     {
         for row in grid.iter_mut() {
-            if row[hc] == ' ' || row[hc] == '┊' {
-                row[hc] = '▌';
-            }
+        if row[hc] == ' ' || row[hc] == '┊' {
+            row[hc] = '|';
+        }
         }
     }
 
@@ -368,7 +368,7 @@ pub fn render_sparkline_widget<'a>(
             // underlying glyph (`━`, ` `, `┊`, `▌`) visible.
             let style = if Some(abs_col) == g.playhead_col {
                 Style::default().bg(Color::Yellow).fg(Color::Black)
-            } else if ch == '▌' {
+            } else if ch == '|' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if ch == '━' {
                 Style::default().bg(bg).fg(Color::Black)
@@ -464,7 +464,7 @@ pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
 /// Count grid columns for a timeline (shared util for mouse mapping).
 /// Count grid columns for a timeline, including inserted bar-line columns.
 pub fn total_cols(total_ticks: u64, beats_per_bar: Option<u32>) -> usize {
-    let tpc = TICKS_PER_BEAT as u64 / 2;
+    let tpc = TICKS_PER_BEAT as u64 / 4;
     let base = (total_ticks.max(1) / tpc) as usize;
     let bar_count = beats_per_bar
         .filter(|&b| b > 0)

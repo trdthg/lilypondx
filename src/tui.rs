@@ -566,7 +566,7 @@ fn draw_track_top_border(
     if show_bar_numbers {
         if let (Some(bpb), Some(total)) = (beats_per_bar, total_ticks) {
             if bpb > 0 && total > 0 {
-                let tpc = TICKS_PER_BEAT as u64 / 2;
+                let tpc = TICKS_PER_BEAT as u64 / 4;
                 let bar_len = bpb as u64 * TICKS_PER_BEAT as u64;
                 let bar_ticks: Vec<u64> = {
                     let mut v = Vec::new();
