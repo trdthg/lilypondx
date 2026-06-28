@@ -37,21 +37,20 @@ pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEv
         let program = midi_program(track.midi_instrument.as_deref().unwrap_or("acoustic grand"));
         events.push(MidiEvent { tick: 0, channel, command: 0xC0, data1: program, data2: 0 });
 
-        let mut current_tick: u64 = 0;
         for n in &parsed.notes {
+            let start = n.start_tick;
             for &pitch in &n.pitches {
                 events.push(MidiEvent {
-                    tick: current_tick, channel, command: 0x90, data1: pitch, data2: 80,
+                    tick: start, channel, command: 0x90, data1: pitch, data2: 80,
                 });
                 events.push(MidiEvent {
-                    tick: current_tick + n.duration as u64,
+                    tick: start + n.duration as u64,
                     channel,
                     command: 0x80,
                     data1: pitch,
                     data2: 64,
                 });
             }
-            current_tick += n.duration as u64;
         }
     }
 

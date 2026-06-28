@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use lilypondx::audio;
 use lilypondx::error::LilypondxError;
 use lilypondx::ly_gen;
+use lilypondx::midi_file;
 use lilypondx::note;
 use lilypondx::parser;
 use lilypondx::sparkline;
@@ -117,6 +118,53 @@ fn main() -> Result<(), LilypondxError> {
 }
 
 fn cmd_play(file: &Path, no_tui: bool, width: usize, no_watch: bool, scale: String) -> Result<(), LilypondxError> {
+    let source = file.to_string_lossy().to_string();
+    let is_url = source.starts_with("http://") || source.starts_with("https://");
+
+    // For .ly files (local or downloaded from URL), compile directly.
+    let is_ly = source.ends_with(".ly");
+    if is_ly {
+        // For URL .ly files, download to a temp file that lives until we're done.
+        let _download_tmp: Option<tempfile::TempDir>;
+        let ly_path = if is_url {
+            let tmp = tempfile::TempDir::new().map_err(LilypondxError::Io)?;
+            let p = tmp.path().join("downloaded.ly");
+            let content = ureq::get(&source)
+                .call()
+                .map_err(|e| LilypondxError::Http(format!("{e}")))?
+                .into_string()
+                .map_err(|e| LilypondxError::Http(format!("{e}")))?;
+            std::fs::write(&p, content)?;
+            _download_tmp = Some(tmp);
+            p
+        } else {
+            _download_tmp = None;
+            file.to_path_buf()
+        };
+
+        println!("Compiling {} with LilyPond...", ly_path.display());
+        let (events, tempo_bpm, _tpb) = midi_file::compile_ly_file(&ly_path)?;
+        println!("Compiled: {} MIDI events ({} BPM)", events.len(), tempo_bpm);
+
+        if no_tui {
+            let sf2 = synth::find_soundfont();
+            if let Some(p) = &sf2 {
+                println!("Using SoundFont: {}", p.display());
+            } else {
+                println!("No SoundFont found — using built-in oscillator synth");
+            }
+            let player = audio::AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
+            println!("▶ Playing...");
+            player.play()?;
+        } else {
+            // TUI mode: convert MIDI events → sparkline via midi_events_to_parsed_track.
+            let title = ly_path.file_stem().and_then(|s| s.to_str()).unwrap_or("score").to_string();
+            let app = lilypondx::tui::App::new_midi(title, events, tempo_bpm);
+            tui::run_tui_with_app(app)?;
+        }
+        return Ok(());
+    }
+
     if no_tui {
         // Headless playback (no TUI, no watching).
         let score = parser::parse_markdown(&file.to_string_lossy())?;

@@ -8,6 +8,8 @@ pub struct Note {
     pub duration: u32,
     /// Whether a tie starts from this note (glues to next note).
     pub tie: bool,
+    /// Absolute start tick (when this note begins).
+    pub start_tick: u64,
 }
 
 /// Result of parsing a single track's notes.
@@ -92,7 +94,7 @@ fn parse_notes_impl(
                 chars.next();
                 let dur = parse_duration(&mut chars, default_duration, ticks_per_beat);
                 default_duration = dur;
-                notes.push(Note { pitches: Vec::new(), duration: dur, tie: false });
+                notes.push(Note { pitches: Vec::new(), duration: dur, tie: false, start_tick: current_tick });
                 current_tick += dur as u64;
             }
             '<' => {
@@ -134,7 +136,7 @@ fn parse_notes_impl(
                     chars.next();
                     tie = true;
                 }
-                notes.push(Note { pitches: chord_pitches, duration: dur, tie });
+                notes.push(Note { pitches: chord_pitches, duration: dur, tie, start_tick: current_tick });
                 current_tick += dur as u64;
             }
             'a'..='g' => {
@@ -153,7 +155,7 @@ fn parse_notes_impl(
                     tie = true;
                 }
 
-                notes.push(Note { pitches: vec![pitch], duration: dur, tie });
+                notes.push(Note { pitches: vec![pitch], duration: dur, tie, start_tick: current_tick });
                 prev_pitch = pitch;
                 current_tick += dur as u64;
             }
@@ -331,7 +333,68 @@ fn skip_command(chars: &mut std::iter::Peekable<std::str::Chars>) {
     }
 }
 
-/// Serialize parsed notes to a compact test-friendly format:
+/// Convert raw MIDI events (note_on/note_off pairs) into a `ParsedTrack`.
+/// Each note_on with velocity > 0 starts a note; the matching note_off ends it.
+/// Multiple simultaneous notes become chords (same start_tick, grouped).
+pub fn midi_events_to_parsed_track(events: &[crate::audio::MidiEvent]) -> ParsedTrack {
+    use std::collections::HashMap;
+
+    // Collect (pitch, start_tick, end_tick) for each note.
+    // Track active notes: (channel, pitch) → start_tick.
+    let mut active: HashMap<(u8, u8), u64> = HashMap::new();
+    let mut raw_notes: Vec<(u8, u64, u64)> = Vec::new(); // (pitch, start, end)
+
+    for ev in events {
+        match ev.command {
+            0x90 if ev.data2 > 0 => {
+                // Note on.
+                active.insert((ev.channel, ev.data1), ev.tick);
+            }
+            0x80 => {
+                // Note off.
+                if let Some(start) = active.remove(&(ev.channel, ev.data1)) {
+                    raw_notes.push((ev.data1, start, ev.tick));
+                }
+            }
+            0x90 if ev.data2 == 0 => {
+                // Note on with velocity 0 = note off.
+                if let Some(start) = active.remove(&(ev.channel, ev.data1)) {
+                    raw_notes.push((ev.data1, start, ev.tick));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Group notes by start_tick (chords share start_tick).
+    raw_notes.sort_by_key(|(_, start, _)| *start);
+    let mut notes: Vec<Note> = Vec::new();
+    let mut i = 0;
+    let total_ticks = raw_notes.iter().map(|(_, _, end)| *end).max().unwrap_or(0);
+    while i < raw_notes.len() {
+        let start = raw_notes[i].1;
+        let mut group: Vec<(u8, u64, u64)> = Vec::new();
+        while i < raw_notes.len() && raw_notes[i].1 == start {
+            group.push(raw_notes[i]);
+            i += 1;
+        }
+        // Duration = max end - start.
+        let max_end = group.iter().map(|(_, _, end)| *end).max().unwrap_or(start);
+        let duration = (max_end - start).max(1) as u32;
+        let pitches: Vec<u8> = group.iter().map(|(p, _, _)| *p).collect();
+        notes.push(Note {
+            pitches,
+            duration,
+            tie: false,
+            start_tick: start,
+        });
+    }
+
+    ParsedTrack {
+        notes,
+        total_ticks,
+    }
+}
 /// `PITCH,DURATION` per note, space-separated. `R` for rests, `~` suffix for ties.
 /// Chords are serialized as `[p1+p2+p3],DURATION`.
 pub fn serialize_notes(track: &ParsedTrack) -> String {

@@ -27,6 +27,9 @@ pub struct App {
     cache_dirty: bool,
     /// Cached MIDI events + tempo so resume_playback doesn't recompile.
     cached_events: Option<(Vec<crate::audio::MidiEvent>, u32)>,
+    /// Pre-parsed tracks from MIDI (for .ly files).  When set, `parsed_tracks()`
+    /// returns this instead of calling `parse_notes_relative`.
+    midi_parsed: Option<Vec<(String, ParsedTrack)>>,
     /// Last playback progress captured before stop (so it doesn't jump to 0).
     final_progress: f64,
     pub reload_error: Option<String>,
@@ -54,6 +57,7 @@ impl App {
             parsed_cache: Vec::new(),
             cache_dirty: true,
             cached_events: None,
+            midi_parsed: None,
             final_progress: 0.0,
             reload_error: None,
             hover_col: None,
@@ -66,7 +70,33 @@ impl App {
         }
     }
 
+    pub fn new_midi(title: String, events: Vec<crate::audio::MidiEvent>, tempo_bpm: u32) -> Self {
+        let parsed = crate::note::midi_events_to_parsed_track(&events);
+        let score = Score {
+            metadata: crate::score::ScoreMetadata {
+                title,
+                tempo: Some(format!("4 = {tempo_bpm}")),
+                ..Default::default()
+            },
+            tracks: vec![crate::score::Track {
+                name: "MIDI".into(),
+                clef: "treble".into(),
+                relative: "c'".into(),
+                midi_instrument: None,
+                notes: String::new(),
+                syntax: "ly".into(),
+            }],
+        };
+        let mut app = Self::new(score);
+        app.cached_events = Some((events, tempo_bpm));
+        app.midi_parsed = Some(vec![("MIDI".into(), parsed)]);
+        app
+    }
+
     pub fn parsed_tracks(&mut self) -> &[(String, ParsedTrack)] {
+        if let Some(ref mp) = self.midi_parsed {
+            return mp.as_slice();
+        }
         if self.cache_dirty {
             self.parsed_cache = self
                 .score
@@ -84,8 +114,13 @@ impl App {
 
     pub fn start_playback(&mut self) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let (events, tempo_bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
-        self.cached_events = Some((events.clone(), tempo_bpm));
+        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
+            cached.clone()
+        } else {
+            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+            self.cached_events = Some((ev.clone(), bpm));
+            (ev, bpm)
+        };
         if events.is_empty() {
             return Ok(());
         }
@@ -209,6 +244,17 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, no_watch: bool, scale
     app.scale_mode = resolve_scale_mode(&app.score, &scale);
     app.start_playback()?;
 
+    run_tui_loop(app, file, is_url, !no_watch)
+}
+
+/// Run TUI with a pre-built App (for .ly files where App is constructed from MIDI).
+pub fn run_tui_with_app(mut app: App) -> Result<(), LilypondxError> {
+    app.start_playback()?;
+    run_tui_loop(app, PathBuf::new(), false, false)
+}
+
+fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: bool) -> Result<(), LilypondxError> {
+    let source = file.to_string_lossy().to_string();
     term::enable_raw_mode().map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
     let _guard = TerminalGuard;
     let mut stdout = std::io::stdout();
@@ -229,7 +275,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, no_watch: bool, scale
     // File watcher for local files; disabled for HTTP URLs or --no-watch.
     let mut watcher: Option<notify::RecommendedWatcher> = None;
     let (tx, rx) = std::sync::mpsc::channel();
-    let should_watch = !is_url && !no_watch;
+    let should_watch = !is_url && should_watch_local;
     if should_watch {
         let canonical = file.canonicalize()?;
         let mut w = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {

@@ -81,6 +81,30 @@ fn find_midi_in_dir(dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Compile a raw `.ly` file directly to MIDI (without our `ly_gen` wrapper).
+/// Returns (events, tempo_bpm, ticks_per_beat).
+pub fn compile_ly_file(path: &Path) -> Result<(Vec<MidiEvent>, u32, u32), LilypondxError> {
+    let tmp = TempDir::new().map_err(|e| LilypondxError::Io(e))?;
+    let output_base = tmp.path().join("output");
+
+    let result = Command::new("lilypond")
+        .arg("-o")
+        .arg(&output_base)
+        .arg(path)
+        .output()
+        .map_err(|_| LilypondxError::LilypondNotFound)?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(LilypondxError::LilypondError(stderr.to_string()));
+    }
+
+    let midi_path = find_midi_in_dir(tmp.path())
+        .ok_or_else(|| LilypondxError::LilypondError("no .midi output produced".into()))?;
+
+    parse_midi_file(&midi_path)
+}
+
 /// Parse a Standard MIDI File into MidiEvents and extract tempo / ticks-per-beat.
 pub fn parse_midi_file(path: &Path) -> Result<(Vec<MidiEvent>, u32, u32), LilypondxError> {
     let mut file = std::fs::File::open(path)?;

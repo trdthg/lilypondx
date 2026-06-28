@@ -217,12 +217,12 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
             row[col] = '┊';
         }
     }
-    let mut current_tick: u64 = 0;
     for note in &track.notes {
-        let start_col = tick_to_col(current_tick);
+        let note_tick = note.start_tick;
+        let start_col = tick_to_col(note_tick);
         // For the end column, use strict `<` so a note ending exactly at a
         // bar boundary doesn't paint over the bar line column.
-        let end_tick = current_tick + note.duration as u64;
+        let end_tick = note_tick + note.duration as u64;
         let end_base = (end_tick / ticks_per_col) as usize;
         let end_bars = bar_ticks.iter().filter(|&&bt| bt < end_tick).count();
         let end_col = (end_base + end_bars).max(start_col + 1).min(total_cols);
@@ -230,11 +230,9 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         for &pitch in &note.pitches {
             let row = pitch_to_row(pitch);
             for (_col, cell) in grid[row].iter_mut().enumerate().take(end_col).skip(start_col) {
-                // Notes overlay bar lines — a note's glyph takes precedence.
                 *cell = '━';
             }
         }
-        current_tick += note.duration as u64;
     }
 
     // Hover highlight (overlays on top, but keeps note glyphs).
@@ -260,12 +258,11 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     let playhead_col = config.progress.and_then(|p| {
         let p = p.clamp(0.0, 1.0);
         let current_tick = (p * total_ticks as f64).round() as u64;
-        let mut t: u64 = 0;
         let mut snap: Option<usize> = None;
         let mut last_pitched: Option<usize> = None;
         for note in &track.notes {
-            let start = t;
-            let end = t + note.duration as u64;
+            let start = note.start_tick;
+            let end = start + note.duration as u64;
             if !note.pitches.is_empty() {
                 last_pitched = Some(tick_to_col(start));
             }
@@ -273,9 +270,6 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
                 if !note.pitches.is_empty() {
                     let note_start_col = tick_to_col(start);
                     let col = tick_to_col(current_tick);
-                    // The playhead should never be before the note's start
-                    // column (can happen due to float rounding in progress→tick),
-                    // and should never land on a bar-line column.
                     snap = Some(if col < note_start_col || bar_cols.contains(&col) {
                         note_start_col
                     } else {
@@ -284,7 +278,6 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
                 }
                 break;
             }
-            t = end;
         }
         // Past the last note: hold at the last column (end of piece).
         if snap.is_none() && current_tick >= total_ticks {
@@ -292,13 +285,11 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         }
         // Rest: snap to next upcoming pitched note.
         if snap.is_none() {
-            let mut t: u64 = 0;
             for note in &track.notes {
-                if current_tick <= t && !note.pitches.is_empty() {
-                    snap = Some(tick_to_col(t));
+                if current_tick <= note.start_tick && !note.pitches.is_empty() {
+                    snap = Some(tick_to_col(note.start_tick));
                     break;
                 }
-                t += note.duration as u64;
             }
         }
         snap.or(last_pitched).filter(|&c| c < total_cols)
