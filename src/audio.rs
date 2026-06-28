@@ -354,8 +354,14 @@ fn play_impl(
             let st = state.lock().unwrap();
             (st.event_index, st.events.len())
         };
-        if idx > 0 && idx <= total {
-            current_tick.store(state.lock().unwrap().events[idx - 1].tick, Ordering::Relaxed);
+        // Compute the actual playback position from sample_count (the audio
+        // device's current position), NOT from the last processed event's tick.
+        // The callback processes events in advance (buffering), so
+        // events[idx-1].tick is ahead of what's actually being heard.
+        {
+            let st = state.lock().unwrap();
+            let actual_tick = (st.sample_count as f64 / st.samples_per_tick) as u64;
+            current_tick.store(actual_tick, Ordering::Relaxed);
         }
         if idx >= total {
             std::thread::sleep(Duration::from_millis(500));
