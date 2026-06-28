@@ -57,7 +57,7 @@ fn parse_rests_and_bars() {
 
 #[test]
 fn frontmatter_metadata() {
-    let score = parser::parse_markdown(std::path::Path::new("tests/data/frontmatter.md"))
+    let score = parser::parse_markdown("tests/data/frontmatter.md")
         .expect("parse");
     assert_eq!(score.metadata.title, "frontmatter test");
     assert_eq!(score.metadata.composer.as_deref(), Some("青木望"));
@@ -74,7 +74,7 @@ fn frontmatter_metadata() {
 #[test]
 fn lilypondx_syntax_detected() {
     let score =
-        parser::parse_markdown(std::path::Path::new("tests/data/pipeline_multitrack.md"))
+        parser::parse_markdown("tests/data/pipeline_multitrack.md")
             .expect("parse");
     assert_eq!(score.tracks.len(), 2);
     for t in &score.tracks {
@@ -85,7 +85,7 @@ fn lilypondx_syntax_detected() {
 #[test]
 fn native_lilypond_syntax_detected() {
     let score =
-        parser::parse_markdown(std::path::Path::new("tests/data/frontmatter.md"))
+        parser::parse_markdown("tests/data/frontmatter.md")
             .expect("parse");
     for t in &score.tracks {
         assert_eq!(t.syntax, "lilypond");
@@ -94,7 +94,7 @@ fn native_lilypond_syntax_detected() {
 
 #[test]
 fn bare_fences_yield_no_tracks() {
-    let score = parser::parse_markdown(std::path::Path::new("tests/data/no_tracks.md"))
+    let score = parser::parse_markdown("tests/data/no_tracks.md")
         .expect("parse");
     assert!(score.tracks.is_empty(), "bare fences should produce 0 tracks");
 }

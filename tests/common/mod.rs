@@ -27,7 +27,7 @@ pub struct Pair {
 /// syntax `test` are expected outputs. They are paired in order of appearance.
 /// Panics (via `expect`) if a `lilypond-test` block has no preceding input.
 pub fn load_pairs(path: &Path) -> Vec<Pair> {
-    let score: Score = parser::parse_markdown(path).expect("parse markdown");
+    let score: Score = parser::parse_markdown(&path.to_string_lossy()).expect("parse markdown");
     let mut pairs = Vec::new();
     let mut pending_input: Option<Track> = None;
     for track in score.tracks {

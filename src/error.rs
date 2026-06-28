@@ -22,4 +22,7 @@ pub enum LilypondxError {
 
     #[error("MIDI file parse error: {0}")]
     MidiParse(String),
+
+    #[error("HTTP error: {0}")]
+    Http(String),
 }

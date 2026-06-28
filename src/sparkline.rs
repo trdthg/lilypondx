@@ -133,17 +133,21 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         ScaleMode::Diatonic(mask) => Some(mask),
     };
 
+    // Collect the set of pitch classes that actually appear in the track.
+    // These are always shown (even if outside the scale) so out-of-key notes
+    // render on their own row instead of being snapped to a nearby in-key row.
+    let used_pcs: u16 = pitches.iter().fold(0u16, |acc, &p| acc | (1 << (p % 12)));
+
     // Build the list of row pitches: every semitone between (min-1) and
-    // (max+1), but in Diatonic mode skip rows whose pitch class is not in the
-    // scale.  Always include min_p and max_p even if they fall outside the
-    // scale (shouldn't happen if detection was correct, but be safe).
+    // (max+1), but skip rows that are neither in the scale nor actually
+    // used in the track.
     let lo = min_p.saturating_sub(1);
     let hi = max_p.saturating_add(1);
     let mut label_pitches: Vec<u8> = Vec::new();
     for p in (lo..=hi).rev() {
         let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
-        let is_edge = p == min_p || p == max_p;
-        if in_scale || is_edge {
+        let is_used = (used_pcs & (1 << (p % 12))) != 0;
+        if in_scale || is_used {
             label_pitches.push(p);
         }
     }
@@ -376,8 +380,7 @@ pub fn render_sparkline_widget<'a>(
             } else if ch == '▌' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if ch == '━' {
-                // Note glyph: white on the soft background for contrast.
-                Style::default().bg(bg).fg(Color::White)
+                Style::default().bg(bg).fg(Color::Black)
             } else {
                 Style::default().bg(bg).fg(Color::Gray)
             };
@@ -457,10 +460,12 @@ pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
         ScaleMode::Chromatic => None,
         ScaleMode::Diatonic(m) => Some(m),
     };
+    let used_pcs: u16 = pitches.iter().fold(0u16, |acc, &p| acc | (1 << (p % 12)));
     (lo..=hi)
         .filter(|&p| {
             let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
-            in_scale || p == min_p || p == max_p
+            let is_used = (used_pcs & (1 << (p % 12))) != 0;
+            in_scale || is_used
         })
         .count()
 }

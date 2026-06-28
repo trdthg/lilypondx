@@ -1,6 +1,6 @@
 ---
 title: "Mata Ashita!"
-composer: "Traditional"
+composer: "Trdthg"
 tempo: "4 = 120"
 key: 'c \major'
 time: "6/8"

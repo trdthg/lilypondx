@@ -8,7 +8,7 @@ use lilypondx::TICKS_PER_BEAT;
 
 #[test]
 fn multitrack_pipeline() {
-    let score = parser::parse_markdown(std::path::Path::new("tests/data/pipeline_multitrack.md"))
+    let score = parser::parse_markdown("tests/data/pipeline_multitrack.md")
         .expect("parse");
     assert_eq!(score.tracks.len(), 2, "should have RH and LH");
 
@@ -38,7 +38,7 @@ fn multitrack_pipeline() {
 fn lilypond_test_blocks_excluded_from_playback() {
     // A file with a `lilypond-test` block: it must be parsed (for assertions)
     // but must NOT contribute MIDI events to playback.
-    let score = parser::parse_markdown(std::path::Path::new("tests/data/render_ascending.md"))
+    let score = parser::parse_markdown("tests/data/render_ascending.md")
         .expect("parse");
     let events = generate_events_direct(&score, TICKS_PER_BEAT);
     // The single `lilypond` block has 4 notes → at least 4 NoteOns.

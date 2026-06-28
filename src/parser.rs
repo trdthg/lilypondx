@@ -5,10 +5,27 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use crate::error::LilypondxError;
 use crate::score::{Score, ScoreMetadata, Track};
 
-/// Parse a Markdown file into a `Score`.
-pub fn parse_markdown(path: &Path) -> Result<Score, LilypondxError> {
-    let content = std::fs::read_to_string(path)?;
+/// Parse a Markdown score from a file path or HTTP(S) URL.
+pub fn parse_markdown(source: &str) -> Result<Score, LilypondxError> {
+    let content = if source.starts_with("http://") || source.starts_with("https://") {
+        fetch_url(source)?
+    } else {
+        std::fs::read_to_string(Path::new(source))?
+    };
     parse_markdown_str(&content)
+}
+
+/// Fetch markdown content from an HTTP(S) URL.
+fn fetch_url(url: &str) -> Result<String, LilypondxError> {
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| LilypondxError::Http(format!("{e}")))?;
+    let mut reader = resp.into_reader();
+    let mut body = String::new();
+    reader
+        .read_to_string(&mut body)
+        .map_err(|e| LilypondxError::Http(format!("{e}")))?;
+    Ok(body)
 }
 
 fn parse_markdown_str(content: &str) -> Result<Score, LilypondxError> {

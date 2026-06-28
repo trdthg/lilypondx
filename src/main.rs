@@ -23,13 +23,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Play a score: parse Markdown, compile to MIDI, and play through built-in synth.
+    /// Play a score with live TUI preview (default) or headless playback.
     Play {
-        /// Path to the .md score file
+        /// Path or HTTP(S) URL to the .md score file
         file: PathBuf,
+        /// Disable TUI, just play audio and exit
+        #[arg(long)]
+        no_tui: bool,
+        /// Sparkline width in columns (default: terminal width or 60)
+        #[arg(short, long)]
+        width: Option<usize>,
+        /// Disable file watching (auto-disabled for HTTP URLs)
+        #[arg(long)]
+        no_watch: bool,
+        /// Pitch row mode: "auto" (detect scale), "chromatic" (all rows),
+        /// or a key like "c major" / "a minor"
+        #[arg(short = 'S', long, default_value = "auto")]
+        scale: String,
     },
 
-        /// Generate a .ly file from a Markdown score (dry-run without playback).
+    /// Generate a .ly file from a Markdown score (dry-run without playback).
     Gen {
         /// Path to the .md score file
         file: PathBuf,
@@ -39,22 +52,6 @@ enum Command {
         /// Generate guitar tablature (TabStaff) alongside standard notation
         #[arg(short = 'T', long)]
         tablature: bool,
-    },
-
-    /// Watch a Markdown score and render live ASCII sparklines on change.
-    Watch {
-        /// Path to the .md score file
-        file: PathBuf,
-        /// Sparkline width in columns (default: terminal width or 60)
-        #[arg(short, long)]
-        width: Option<usize>,
-        /// Number of pitch rows (kept for backward compat, currently unused)
-        #[arg(short, long, default_value = "7")]
-        rows: usize,
-        /// Pitch row mode: "auto" (detect scale), "chromatic" (all rows),
-        /// or a key like "c major" / "a minor"
-        #[arg(short = 'S', long, default_value = "auto")]
-        scale: String,
     },
 
     /// Dump ASCII sparklines to stdout (one-shot, no TUI).
@@ -110,38 +107,43 @@ fn main() -> Result<(), LilypondxError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Play { file } => cmd_play(&file),
+        Command::Play { file, no_tui, width, no_watch, scale } =>
+            cmd_play(&file, no_tui, width.unwrap_or(0), no_watch, scale),
         Command::Gen { file, output, tablature } => cmd_gen(&file, output, tablature),
-        Command::Watch { file, width, rows, scale } => tui::run_tui(file, width.unwrap_or(0), rows, scale),
         Command::Dump { file, rows: _, scale } => cmd_dump(&file, &scale),
         Command::New { file } => cmd_new(file),
         Command::Export { file, output, format, transpose, tablature } => cmd_export(&file, output, format, transpose, tablature),
     }
 }
 
-fn cmd_play(file: &Path) -> Result<(), LilypondxError> {
-    let score = parser::parse_markdown(file)?;
-    println!("Parsed: {} — {} track(s)", score.metadata.title, score.tracks.len());
+fn cmd_play(file: &Path, no_tui: bool, width: usize, no_watch: bool, scale: String) -> Result<(), LilypondxError> {
+    if no_tui {
+        // Headless playback (no TUI, no watching).
+        let score = parser::parse_markdown(&file.to_string_lossy())?;
+        println!("Parsed: {} — {} track(s)", score.metadata.title, score.tracks.len());
 
-    let (events, tempo_bpm) = audio::generate_events(&score, TICKS_PER_BEAT)?;
-    println!("Generated {} MIDI events ({} BPM)", events.len(), tempo_bpm);
+        let (events, tempo_bpm) = audio::generate_events(&score, TICKS_PER_BEAT)?;
+        println!("Generated {} MIDI events ({} BPM)", events.len(), tempo_bpm);
 
-    let sf2 = synth::find_soundfont();
-    if let Some(p) = &sf2 {
-        println!("Using SoundFont: {}", p.display());
+        let sf2 = synth::find_soundfont();
+        if let Some(p) = &sf2 {
+            println!("Using SoundFont: {}", p.display());
+        } else {
+            println!("No SoundFont found — using built-in oscillator synth");
+        }
+
+        let player = audio::AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
+        println!("▶ Playing...");
+        player.play()?;
     } else {
-        println!("No SoundFont found — using built-in oscillator synth");
+        // TUI mode with optional file watching.
+        tui::run_tui(file.to_path_buf(), width, 0, no_watch, scale)?;
     }
-
-    let player = audio::AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
-    println!("▶ Playing...");
-    player.play()?;
-
     Ok(())
 }
 
 fn cmd_gen(file: &Path, output: Option<PathBuf>, tablature: bool) -> Result<(), LilypondxError> {
-    let mut score = parser::parse_markdown(file)?;
+    let mut score = parser::parse_markdown(&file.to_string_lossy())?;
     if tablature {
         score.metadata.tablature = true;
     }
@@ -156,20 +158,14 @@ fn cmd_gen(file: &Path, output: Option<PathBuf>, tablature: bool) -> Result<(), 
 fn cmd_new(file: Option<PathBuf>) -> Result<(), LilypondxError> {
     let out_path = file.unwrap_or_else(|| PathBuf::from("twinkle.md"));
     let template = r#"---
-title: "小星星 (Twinkle, Twinkle, Little Star)"
+title: "=Twinkle, Twinkle, Little Star"
 composer: "Traditional"
 tempo: "4 = 100"
 key: 'c \major'
 time: "4/4"
 ---
 
-# 小星星
-
-经典的启蒙旋律，用于演示 `lilypondx` 的解析、渲染与播放。
-右手 `relative=c'` 锚定 C4; 第一个 `g'` 用八度标记强制上跳，
-之后 relative 上下文留在 G4，后续裸 `g` 自然继承。
-左手 `relative=c,` 锚定 C2，采用 I-I-IV-V-I 进行，
-最后一小节 `g'2 c,2` 形成 G→C 的完满终止 (属到主)。
+# Twinkle, Twinkle, Little Star
 
 ```lilypondx track=RH clef=treble relative=c'
 c4 c g'4 g4 a4 a4 g2 |
@@ -186,7 +182,7 @@ c1 | c1 | f,1 | g'2 c,2 |
 }
 
 fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>, tablature: bool) -> Result<(), LilypondxError> {
-    let mut score = parser::parse_markdown(file)?;
+    let mut score = parser::parse_markdown(&file.to_string_lossy())?;
     // CLI --transpose overrides frontmatter `transpose`
     if transpose.is_some() {
         score.metadata.transpose = transpose;
@@ -241,7 +237,7 @@ fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transp
 }
 
 fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
-    let score = parser::parse_markdown(file)?;
+    let score = parser::parse_markdown(&file.to_string_lossy())?;
 
     // Resolve scale mode.
     let scale_mode = resolve_scale_mode(&score, scale);

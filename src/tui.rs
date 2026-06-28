@@ -200,8 +200,10 @@ impl Drop for TerminalGuard {
 }
 
 /// Run the TUI watch loop. Blocks until the user quits.
-pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Result<(), LilypondxError> {
-    let score = parser::parse_markdown(&file)?;
+pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, no_watch: bool, scale: String) -> Result<(), LilypondxError> {
+    let source = file.to_string_lossy().to_string();
+    let is_url = source.starts_with("http://") || source.starts_with("https://");
+    let score = parser::parse_markdown(&source)?;
     let mut app = App::new(score);
     app.scale_arg = scale.clone();
     app.scale_mode = resolve_scale_mode(&app.score, &scale);
@@ -218,9 +220,19 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Res
         ratatui::Terminal::new(backend).map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
     let _ = terminal.hide_cursor();
 
+    let debounce = Duration::from_millis(150);
+    let mut last_change: Option<Instant> = None;
+    let mut prev_hover_col: Option<usize> = None;
+    let mut needs_redraw = true;
+    let mut running = true;
+
+    // File watcher for local files; disabled for HTTP URLs or --no-watch.
+    let mut watcher: Option<notify::RecommendedWatcher> = None;
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+    let should_watch = !is_url && !no_watch;
+    if should_watch {
+        let canonical = file.canonicalize()?;
+        let mut w = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res
                 && matches!(
                     event.kind,
@@ -231,17 +243,10 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Res
             }
         })
         .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
-
-    let canonical = file.canonicalize()?;
-    watcher
-        .watch(&canonical, notify::RecursiveMode::NonRecursive)
-        .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
-
-    let debounce = Duration::from_millis(150);
-    let mut last_change: Option<Instant> = None;
-    let mut prev_hover_col: Option<usize> = None;
-    let mut needs_redraw = true;
-    let mut running = true;
+        w.watch(&canonical, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
+        watcher = Some(w);
+    }
     while running {
         if needs_redraw {
             terminal.draw(|f| draw_ui(f, &mut app)).ok();
@@ -324,7 +329,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Res
             needs_redraw = true;
         }
 
-        // Watcher events.
+        // Watcher events (local files only).
         while let Ok(ts) = rx.try_recv() {
             last_change = Some(ts);
         }
@@ -332,7 +337,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, scale: String) -> Res
             && ts.elapsed() >= debounce
         {
             last_change = None;
-            match parser::parse_markdown(&canonical) {
+            match parser::parse_markdown(&source) {
                 Ok(new_score) => {
                     app.reload_error = None;
                     app.scroll_offset = 0;
@@ -445,7 +450,7 @@ fn draw_ui(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
-    let title = &app.score.metadata.title;
+    let meta = &app.score.metadata;
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Cyan));
@@ -457,12 +462,33 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
         .filter(|t| t.syntax != "test")
         .map(|t| t.name.as_str())
         .collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    if !meta.title.is_empty() {
+        parts.push(meta.title.clone());
+    }
+    if let Some(c) = &meta.composer {
+        parts.push(c.clone());
+    }
+    if let Some(t) = &meta.tempo {
+        parts.push(format!("♪ {}", t));
+    }
+    if let Some(k) = &meta.key {
+        parts.push(format!("key: {}", k.replace("\\", "")));
+    }
+    if let Some(t) = &meta.time {
+        parts.push(format!("{}/bar", t));
+    }
+    if !visible.is_empty() {
+        parts.push(visible.join(" · "));
+    }
+
     let text = if let Some(err) = &app.reload_error {
-        format!("{title}  —  [reload error: {err}]")
-    } else if visible.is_empty() {
-        format!("{title}  —  (no tracks)")
+        format!("{}  —  [reload error: {err}]", parts.join("  |  "))
+    } else if parts.is_empty() {
+        "(no metadata)".into()
     } else {
-        format!("{title}  —  {}", visible.join(" · "))
+        parts.join("  |  ")
     };
     f.render_widget(Paragraph::new(text).block(block), area);
 }
