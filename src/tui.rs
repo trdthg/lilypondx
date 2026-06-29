@@ -270,6 +270,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
     let mut last_change: Option<Instant> = None;
     let mut prev_hover_col: Option<usize> = None;
     let mut needs_redraw = true;
+    let mut prev_playhead_col: Option<usize> = None;
     let mut running = true;
 
     // File watcher for local files; disabled for HTTP URLs or --no-watch.
@@ -413,11 +414,20 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
             }
         }
 
-        // Playback progress always advances while playing — redraw to animate
-        // the playback head. But cap the rate: only redraw if playing AND
-        // enough time passed since the last draw (avoid spinning the CPU).
+        // Playback progress advances while playing — redraw only when the
+        // *playhead column* actually changes. This avoids burning CPU drawing
+        // identical frames between column transitions (most commonly on long
+        // notes where the head sits on the same column for several frames).
         if app.is_playing() {
-            needs_redraw = true;
+            let p = app.progress();
+            let total = app.total_cols.max(1);
+            let cur = (p * (total.saturating_sub(1)) as f64).round() as usize;
+            if Some(cur) != prev_playhead_col {
+                prev_playhead_col = Some(cur);
+                needs_redraw = true;
+            }
+        } else {
+            prev_playhead_col = None;
         }
 
         // Auto-stop when playback finishes.

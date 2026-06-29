@@ -228,7 +228,7 @@ impl AudioPlayer {
         current_tick.store(start_tick, Ordering::Relaxed);
         std::thread::spawn(move || {
             if let Err(e) = play_impl(
-                &events, ticks_per_beat, tempo_bpm, &playing, &current_tick,
+                &events, ticks_per_beat, tempo_bpm, &playing, current_tick,
                 &last_error, &backend_out, start_tick,
             ) {
                 *last_error.lock().unwrap() = Some(format!("{e}"));
@@ -266,7 +266,7 @@ impl AudioPlayer {
     /// Play blocking from the beginning.
     pub fn play(&self) -> Result<(), LilypondxError> {
         play_impl(
-            &self.events, self.ticks_per_beat, self.tempo_bpm, &self.playing, &self.current_tick,
+            &self.events, self.ticks_per_beat, self.tempo_bpm, &self.playing, self.current_tick.clone(),
             &self.last_error, &self.backend_slot, 0,
         )
     }
@@ -278,7 +278,7 @@ fn play_impl(
     ticks_per_beat: u32,
     tempo_bpm: u32,
     playing: &AtomicBool,
-    current_tick: &AtomicU64,
+    current_tick: Arc<AtomicU64>,
     last_error: &Arc<Mutex<Option<String>>>,
     backend_out: &Arc<Mutex<String>>,
     start_tick: u64,
@@ -297,8 +297,11 @@ fn play_impl(
     // (Windows default is often 48000, macOS 44100).
     let device_sample_rate = config.sample_rate().0 as i32;
 
-    let synth = synth::create_synth_at(device_sample_rate)?;
+    let mut synth = synth::create_synth_at(device_sample_rate)?;
     *backend_out.lock().unwrap() = synth.name().to_string();
+
+    // Total ticks for end-of-playback detection.
+    let total_ticks = events.iter().map(|e| e.tick).max().unwrap_or(0);
 
     // Advance event_index past events before start_tick.
     let mut event_index = 0;
@@ -312,36 +315,35 @@ fn play_impl(
         / (ticks_per_beat as f64 * 1_000_000.0);
     let start_sample = (start_tick as f64 * samples_per_tick) as u64;
 
-    let state = Arc::new(Mutex::new(PlaybackState {
-        synth,
+    let control = Arc::new(Mutex::new(ControlState {
         events: events.to_vec(),
         event_index,
         sample_count: start_sample,
         samples_per_tick,
-        left_buf: vec![0.0; 1024],
-        right_buf: vec![0.0; 1024],
         // Fade in over ~30ms to avoid pops/clicks when seeking.
         ramp_samples: if start_tick > 0 { (device_sample_rate as u64 / 30).max(1) } else { 0 },
     }));
 
     // Clear any hanging notes from a previous synth session.
-    {
-        let mut st = state.lock().unwrap();
-        for ch in 0..16 {
-            st.synth
-                .process_midi_message(ch, 0xB0, 123, 0);
-        }
+    for ch in 0..16 {
+        synth.process_midi_message(ch, 0xB0, 123, 0);
     }
 
     let err_slot = last_error.clone();
-    let state_clone = state.clone();
+    let control_clone = control.clone();
+    let ct_clone = current_tick.clone();
+    // The synth + scratch buffers live INSIDE the closure so they're owned by
+    // the audio thread. No locking needed for them — only `control` is shared.
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
             let config: cpal::StreamConfig = config.into();
+            let mut synth_owned = synth;
+            let mut left_buf: Vec<f32> = vec![0.0; 1024];
+            let mut right_buf: Vec<f32> = vec![0.0; 1024];
             device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback(data, &state_clone);
+                    audio_callback(data, &control_clone, &mut synth_owned, &ct_clone, &mut left_buf, &mut right_buf);
                 },
                 move |err| *err_slot.lock().unwrap() = Some(format!("Audio stream error: {err}")),
                 None,
@@ -356,86 +358,96 @@ fn play_impl(
         .map_err(|e| LilypondxError::Audio(format!("Failed to play audio stream: {e}")))?;
 
     while playing.load(Ordering::Relaxed) {
-        let (idx, total) = {
-            let st = state.lock().unwrap();
-            (st.event_index, st.events.len())
-        };
-        // Compute the actual playback position from sample_count (the audio
-        // device's current position), NOT from the last processed event's tick.
-        // The callback processes events in advance (buffering), so
-        // events[idx-1].tick is ahead of what's actually being heard.
-        {
-            let st = state.lock().unwrap();
-            let actual_tick = (st.sample_count as f64 / st.samples_per_tick) as u64;
-            current_tick.store(actual_tick, Ordering::Relaxed);
-        }
-        if idx >= total {
+        // Read progress purely via atomics — no state lock, so the audio
+        // callback never gets blocked by this polling loop.
+        let actual_tick = current_tick.load(Ordering::Relaxed);
+        // Playback is done when we've passed the last event's tick.
+        if actual_tick >= total_ticks {
             std::thread::sleep(Duration::from_millis(500));
             break;
         }
-        std::thread::sleep(Duration::from_millis(16));
+        std::thread::sleep(Duration::from_millis(33));
     }
 
     drop(stream);
     Ok(())
 }
 
-struct PlaybackState {
-    synth: Box<dyn Synth>,
+// Control state: lightweight data that the main thread might also need to
+// read/write. Kept separate from the synth so the audio callback can render
+// WITHOUT holding any lock — the synth is only ever touched from the audio
+// thread.
+struct ControlState {
     events: Vec<MidiEvent>,
     event_index: usize,
     sample_count: u64,
     samples_per_tick: f64,
-    left_buf: Vec<f32>,
-    right_buf: Vec<f32>,
-    /// Remaining fade-in samples for seek-start pop suppression.
     ramp_samples: u64,
 }
 
-fn audio_callback(data: &mut [f32], state: &Arc<Mutex<PlaybackState>>) {
-    let mut st = state.lock().unwrap();
+fn audio_callback(
+    data: &mut [f32],
+    control: &Arc<Mutex<ControlState>>,
+    synth: &mut Box<dyn Synth>,
+    current_tick: &AtomicU64,
+    left_buf: &mut Vec<f32>,
+    right_buf: &mut Vec<f32>,
+) {
     let half = data.len() / 2;
-    if st.left_buf.len() != half {
-        st.left_buf.resize(half, 0.0);
-        st.right_buf.resize(half, 0.0);
+    if left_buf.len() != half {
+        left_buf.resize(half, 0.0);
+        right_buf.resize(half, 0.0);
     }
 
-    let end_sample = st.sample_count + half as u64;
-    let spt = st.samples_per_tick;
-    while st.event_index < st.events.len() {
-        let event_sample = (st.events[st.event_index].tick as f64 * spt) as u64;
-        if event_sample > end_sample {
-            break;
+    // Phase 1: lock ONLY to process pending events + read counters.
+    {
+        let mut cs = control.lock().unwrap();
+        let end_sample = cs.sample_count + half as u64;
+        let spt = cs.samples_per_tick;
+        while cs.event_index < cs.events.len() {
+            let event_sample = (cs.events[cs.event_index].tick as f64 * spt) as u64;
+            if event_sample > end_sample {
+                break;
+            }
+            let ev = cs.events[cs.event_index].clone();
+            synth.process_midi_message(
+                ev.channel as i32,
+                ev.command as i32,
+                ev.data1 as i32,
+                ev.data2 as i32,
+            );
+            cs.event_index += 1;
         }
-        let ev = st.events[st.event_index].clone();
-        st.synth.process_midi_message(
-            ev.channel as i32,
-            ev.command as i32,
-            ev.data1 as i32,
-            ev.data2 as i32,
-        );
-        st.event_index += 1;
     }
+    // Lock released — synth.render runs without holding it.
 
-    let PlaybackState { synth, left_buf, right_buf, ramp_samples, .. } = &mut *st;
+    // Phase 2: render audio (no lock).
     synth.render(&mut left_buf[..half], &mut right_buf[..half]);
 
-    let ramp = *ramp_samples;
-    if ramp > 0 {
-        let n = half.min(ramp as usize);
-        for i in 0..n {
-            let gain = i as f64 / ramp as f64;
-            let gain = (gain * gain) as f32; // quadratic ease-out
-            left_buf[i] *= gain;
-            right_buf[i] *= gain;
+    // Phase 3: lock briefly to update counters + apply ramp.
+    let actual_tick;
+    {
+        let mut cs = control.lock().unwrap();
+        actual_tick = (cs.sample_count as f64 / cs.samples_per_tick) as u64;
+
+        let ramp = cs.ramp_samples;
+        if ramp > 0 {
+            let n = half.min(ramp as usize);
+            for i in 0..n {
+                let gain = i as f64 / ramp as f64;
+                let gain = (gain * gain) as f32;
+                left_buf[i] *= gain;
+                right_buf[i] *= gain;
+            }
+            cs.ramp_samples = ramp.saturating_sub(half as u64);
         }
-        *ramp_samples = ramp.saturating_sub(half as u64);
+        cs.sample_count += half as u64;
     }
 
+    // Interleave into the output buffer (no lock).
     for i in 0..half {
         data[i * 2] = left_buf[i];
         data[i * 2 + 1] = right_buf[i];
     }
-
-    st.sample_count = end_sample;
+    current_tick.store(actual_tick, Ordering::Relaxed);
 }
