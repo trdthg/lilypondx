@@ -21,9 +21,11 @@ pub struct MidiEvent {
 }
 
 /// Generate MIDI events for all tracks.
+///
 /// - `lilypondx` tracks: use internal parser (no external deps)
 /// - `lilypond` tracks: call the real LilyPond compiler
 /// - `lilypond-test` blocks: skipped
+///
 /// Returns (events, tempo_bpm).
 pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEvent>, u32), LilypondxError> {
     let mut events = Vec::new();

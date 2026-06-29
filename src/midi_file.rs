@@ -30,7 +30,7 @@ pub fn compile_lilypond_tracks(score: &Score) -> Result<(Vec<MidiEvent>, u32, u3
         return Ok((Vec::new(), 120, 480));
     }
 
-    let tmp = TempDir::new().map_err(|e| LilypondxError::Io(e))?;
+    let tmp = TempDir::new().map_err(LilypondxError::Io)?;
     let ly_path = tmp.path().join("score.ly");
 
     // Reuse ly_gen to produce a full .ly file, but we need to limit to lilypond tracks.
@@ -86,7 +86,7 @@ fn find_midi_in_dir(dir: &Path) -> Option<std::path::PathBuf> {
 /// Compile a raw `.ly` file directly to MIDI (without our `ly_gen` wrapper).
 /// Returns (events, tempo_bpm, ticks_per_beat).
 pub fn compile_ly_file(path: &Path) -> Result<(Vec<MidiEvent>, u32, u32), LilypondxError> {
-    let tmp = TempDir::new().map_err(|e| LilypondxError::Io(e))?;
+    let tmp = TempDir::new().map_err(LilypondxError::Io)?;
     let output_base = tmp.path().join("output");
 
     let result = Command::new("lilypond")
@@ -153,10 +153,8 @@ pub fn parse_midi_file(path: &Path) -> Result<(Vec<MidiEvent>, u32, u32), Lilypo
                         _ => {}
                     }
                 }
-                midly::TrackEventKind::Meta(meta) => {
-                    if let midly::MetaMessage::Tempo(micros) = meta {
-                        tempo_micros_per_qn = micros.as_int() as u64;
-                    }
+                midly::TrackEventKind::Meta(midly::MetaMessage::Tempo(micros)) => {
+                    tempo_micros_per_qn = micros.as_int() as u64;
                 }
                 _ => {}
             }

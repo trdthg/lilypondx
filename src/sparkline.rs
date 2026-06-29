@@ -5,19 +5,14 @@ use crate::note::ParsedTrack;
 use crate::TICKS_PER_BEAT;
 
 /// Which pitch rows to show in the sparkline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
     /// Show only notes of the given scale (major/minor).  The tonic + mode
     /// are encoded as a bitmask of 7 pitch classes.
     Diatonic(u16),
     /// Show all semitone rows (current default behavior).
+    #[default]
     Chromatic,
-}
-
-impl Default for ScaleMode {
-    fn default() -> Self {
-        ScaleMode::Chromatic
-    }
 }
 
 /// Configuration for sparkline rendering.
@@ -145,7 +140,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     let hi = max_p.saturating_add(1);
     let mut label_pitches: Vec<u8> = Vec::new();
     for p in (lo..=hi).rev() {
-        let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
+        let in_scale = scale_mask.is_none_or(|m| (m & (1 << (p % 12))) != 0);
         let is_used = (used_pcs & (1 << (p % 12))) != 0;
         if in_scale || is_used {
             label_pitches.push(p);
@@ -454,7 +449,7 @@ pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
     let used_pcs: u16 = pitches.iter().fold(0u16, |acc, &p| acc | (1 << (p % 12)));
     (lo..=hi)
         .filter(|&p| {
-            let in_scale = scale_mask.map_or(true, |m| (m & (1 << (p % 12))) != 0);
+            let in_scale = scale_mask.is_none_or(|m| (m & (1 << (p % 12))) != 0);
             let is_used = (used_pcs & (1 << (p % 12))) != 0;
             in_scale || is_used
         })

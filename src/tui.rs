@@ -453,11 +453,11 @@ fn resolve_scale_mode(score: &Score, arg: &str) -> sparkline::ScaleMode {
     match arg.trim() {
         "chromatic" => sparkline::ScaleMode::Chromatic,
         "auto" => {
-            // 1. Try frontmatter `key`.
-            if let Some(k) = &score.metadata.key {
-                if let Some(mode) = sparkline::parse_key(k) {
-                    return mode;
-                }
+            // 1. Try frontmatter `key`, then auto-detect from all tracks' pitches.
+            if let Some(k) = &score.metadata.key
+                && let Some(mode) = sparkline::parse_key(k)
+            {
+                return mode;
             }
             // 2. Auto-detect from all tracks' pitches.
             let parsed: Vec<crate::note::ParsedTrack> = score
@@ -541,6 +541,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Draw the top border of a track, with the track name at the start and
 /// optional bar numbers (first track only).
+#[allow(clippy::too_many_arguments)]
 fn draw_track_top_border(
     f: &mut Frame,
     area: Rect,
@@ -563,50 +564,50 @@ fn draw_track_top_border(
     }
 
     // Bar numbers (first track only).
-    if show_bar_numbers {
-        if let (Some(bpb), Some(total)) = (beats_per_bar, total_ticks) {
-            if bpb > 0 && total > 0 {
-                let tpc = TICKS_PER_BEAT as u64 / 4;
-                let bar_len = bpb as u64 * TICKS_PER_BEAT as u64;
-                let bar_ticks: Vec<u64> = {
-                    let mut v = Vec::new();
-                    let mut t = bar_len;
-                    while t < total {
-                        v.push(t);
-                        t += bar_len;
-                    }
-                    v
-                };
-                for (i, &bt) in bar_ticks.iter().enumerate() {
-                    let bar_number = (i + 2) as usize;
-                    if bar_number % 4 != 0 {
-                        continue;
-                    }
-                    let base = (bt / tpc) as usize;
-                    let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
-                    let col = base + bars_before;
-                    if col < scroll_offset || col >= scroll_offset + visible_width {
-                        continue;
-                    }
-                    let vis_col = col - scroll_offset;
-                    let pos = GRID_X_OFFSET as usize + vis_col;
-                    let num_str = bar_number.to_string();
-                    let num_len = num_str.len();
-                    for (offset, digit) in num_str.chars().rev().enumerate() {
-                        let p = pos.saturating_sub(offset);
-                        if p < line_width {
-                            buf[p] = digit;
-                        }
-                    }
-                    let before = pos.saturating_sub(num_len);
-                    if before < line_width {
-                        buf[before] = ' ';
-                    }
-                    let after = pos + 1;
-                    if after < line_width {
-                        buf[after] = ' ';
-                    }
+    if show_bar_numbers
+        && let (Some(bpb), Some(total)) = (beats_per_bar, total_ticks)
+        && bpb > 0
+        && total > 0
+    {
+        let tpc = TICKS_PER_BEAT as u64 / 4;
+        let bar_len = bpb as u64 * TICKS_PER_BEAT as u64;
+        let bar_ticks: Vec<u64> = {
+            let mut v = Vec::new();
+            let mut t = bar_len;
+            while t < total {
+                v.push(t);
+                t += bar_len;
+            }
+            v
+        };
+        for (i, &bt) in bar_ticks.iter().enumerate() {
+            let bar_number = i + 2;
+            if bar_number % 4 != 0 {
+                continue;
+            }
+            let base = (bt / tpc) as usize;
+            let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
+            let col = base + bars_before;
+            if col < scroll_offset || col >= scroll_offset + visible_width {
+                continue;
+            }
+            let vis_col = col - scroll_offset;
+            let pos = GRID_X_OFFSET as usize + vis_col;
+            let num_str = bar_number.to_string();
+            let num_len = num_str.len();
+            for (offset, digit) in num_str.chars().rev().enumerate() {
+                let p = pos.saturating_sub(offset);
+                if p < line_width {
+                    buf[p] = digit;
                 }
+            }
+            let before = pos.saturating_sub(num_len);
+            if before < line_width {
+                buf[before] = ' ';
+            }
+            let after = pos + 1;
+            if after < line_width {
+                buf[after] = ' ';
             }
         }
     }

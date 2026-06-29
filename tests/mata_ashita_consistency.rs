@@ -3,8 +3,6 @@
 
 mod common;
 
-use std::path::Path;
-
 use lilypondx::audio::{generate_events, MidiEvent};
 use lilypondx::note::parse_notes_relative;
 use lilypondx::parser::parse_markdown;
@@ -22,7 +20,6 @@ fn mata_ashita_sparkline_identical() {
     let content = std::fs::read_to_string(lilypondx_path).unwrap();
     let lily_content = make_lilypond_version(&content);
 
-    let lilypondx_temp = "/tmp/mata_ashita_lilypondx.md";
     let lilypond_temp = "/tmp/mata_ashita_lilypond.md";
     // Current file already has both tracks as lilypondx; write lilypond variant.
     std::fs::write(lilypond_temp, &lily_content).unwrap();

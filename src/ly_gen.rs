@@ -33,8 +33,6 @@ pub fn generate_ly(score: &Score) -> String {
         let body = track_body(track, meta);
         if let Some(semitones) = &meta.transpose {
             let target = semitones_to_pitch(*semitones);
-            // \transpose must wrap \relative, not the other way around,
-            // otherwise relative pitch resolution gives wrong intervals.
             out.push_str(&format!("{} = \\transpose c {} {{\n", track.name, target));
             out.push_str(&format!("  \\relative {} {{\n", track.relative));
             for line in body.lines() {
@@ -54,14 +52,15 @@ pub fn generate_ly(score: &Score) -> String {
     write_staff_block(&mut out, score, true, tablature);
     out.push_str("  \\layout { }\n}\n\n");
 
-    let midi_name = midi_output_name(&score.metadata.title);
-    out.push_str(&format!("{} = {{\n", midi_name));
+    // Fixed MIDI variable name — decoupled from the title to avoid generating
+    // invalid LilyPond identifiers (digit-prefixed, keyword collisions, etc.).
+    const MIDI_VAR: &str = "score_midi";
+    out.push_str(&format!("{MIDI_VAR} = {{\n"));
     write_staff_block(&mut out, score, false, false);
     out.push_str("}\n\n");
 
     out.push_str(&format!(
-        "\\book {{\n  \\bookOutputName \"{}\"\n  \\score {{ \\{} \\midi {{ }} }}\n}}\n",
-        midi_name, midi_name
+        "\\book {{\n  \\bookOutputName \"{MIDI_VAR}\"\n  \\score {{ \\{MIDI_VAR} \\midi {{ }} }}\n}}\n"
     ));
 
     out
@@ -74,7 +73,6 @@ fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: b
     let combined = score.metadata.parts.as_deref() == Some("combined");
 
     if combined && tracks.len() > 1 {
-        // Combined: all tracks on one staff (<< t1 t2 >>).
         if layout {
             if tablature {
                 out.push_str("  \\new StaffGroup <<\n");
@@ -99,7 +97,7 @@ fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: b
         } else {
             let inst = tracks[0].midi_instrument.as_deref().unwrap_or("acoustic grand");
             out.push_str("  \\new Staff = \"combined\" {\n");
-            out.push_str(&format!("    \\set Staff.midiInstrument = #\"{}\"\n", inst));
+            out.push_str(&format!("    \\set Staff.midiInstrument = #\"{inst}\"\n"));
             out.push_str("    << ");
             for t in &tracks {
                 out.push_str(&format!("\\{} ", t.name));
@@ -110,7 +108,6 @@ fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: b
         return;
     }
 
-    // Split (default): each track gets its own staff.
     if layout {
         if tracks.len() == 1 {
             let t = tracks[0];
@@ -126,10 +123,10 @@ fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: b
             out.push_str("  \\new PianoStaff <<\n");
             for t in &tracks {
                 if tablature {
-                    out.push_str(&format!("    \\new StaffGroup <<\n"));
+                    out.push_str("    \\new StaffGroup <<\n");
                     out.push_str(&format!("      \\new Staff = \"{}\" \\{}\n", t.name, t.name));
                     out.push_str(&format!("      \\new TabStaff = \"{}_tab\" \\{}\n", t.name, t.name));
-                    out.push_str(&format!("    >>\n"));
+                    out.push_str("    >>\n");
                 } else {
                     out.push_str(&format!("    \\new Staff = \"{}\" \\{}\n", t.name, t.name));
                 }
@@ -141,29 +138,20 @@ fn write_staff_block(out: &mut String, score: &Score, layout: bool, tablature: b
             let t = tracks[0];
             let inst = t.midi_instrument.as_deref().unwrap_or("acoustic grand");
             out.push_str(&format!(
-                "  \\new Staff = \"{}\" {{\n    \\set Staff.midiInstrument = #\"{}\"\n    \\{}\n  }}\n",
-                t.name, inst, t.name
+                "  \\new Staff = \"{}\" {{\n    \\set Staff.midiInstrument = #\"{inst}\"\n    \\{}\n  }}\n",
+                t.name, t.name
             ));
         } else {
             out.push_str("  \\new PianoStaff <<\n");
             for t in &tracks {
                 let inst = t.midi_instrument.as_deref().unwrap_or("acoustic grand");
                 out.push_str(&format!(
-                    "    \\new Staff = \"{}\" {{\n      \\set Staff.midiInstrument = #\"{}\"\n      \\{}\n    }}\n",
-                    t.name, inst, t.name
+                    "    \\new Staff = \"{}\" {{\n      \\set Staff.midiInstrument = #\"{inst}\"\n      \\{}\n    }}\n",
+                    t.name, t.name
                 ));
             }
             out.push_str("  >>\n");
         }
-    }
-}
-
-fn midi_output_name(title: &str) -> String {
-    let base: String = title.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if base.is_empty() {
-        "score_midi".into()
-    } else {
-        format!("{}_midi", base.to_lowercase())
     }
 }
 

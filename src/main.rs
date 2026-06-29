@@ -310,7 +310,7 @@ fn export_once(file: &Path, output: &Option<PathBuf>, format: &ExportFormat, tra
 
     let out_stem = output.clone().unwrap_or_else(|| file.with_extension(""));
 
-    let tmp = tempfile::TempDir::new().map_err(|e| LilypondxError::Io(e))?;
+    let tmp = tempfile::TempDir::new().map_err(LilypondxError::Io)?;
     let ly_path = tmp.path().join("score.ly");
     std::fs::write(&ly_path, &ly)?;
 
@@ -407,10 +407,10 @@ fn resolve_scale_mode(score: &lilypondx::score::Score, arg: &str) -> lilypondx::
     match arg.trim() {
         "chromatic" => sparkline::ScaleMode::Chromatic,
         "auto" => {
-            if let Some(k) = &score.metadata.key {
-                if let Some(mode) = sparkline::parse_key(k) {
-                    return mode;
-                }
+            if let Some(k) = &score.metadata.key
+                && let Some(mode) = sparkline::parse_key(k)
+            {
+                return mode;
             }
             let parsed: Vec<note::ParsedTrack> = score
                 .tracks
