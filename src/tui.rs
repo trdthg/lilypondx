@@ -362,6 +362,23 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                             needs_redraw = true;
                         }
                     }
+                    // Map vertical scroll wheel to horizontal timeline scroll.
+                    // Terminal protocols don't expose horizontal swipe, so the
+                    // trackpad's two-finger scroll (whatever axis) surfaces as
+                    // ScrollUp/ScrollDown here.
+                    MouseEventKind::ScrollUp => {
+                        let step = visible_cols(&app).max(8) / 4;
+                        app.scroll_offset = app.scroll_offset.saturating_sub(step);
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let step = visible_cols(&app).max(8) / 4;
+                        let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
+                        app.scroll_offset = (app.scroll_offset + step).min(max_scroll);
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
                     _ => {}
                 },
                 _ => {}
