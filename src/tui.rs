@@ -47,6 +47,10 @@ pub struct App {
     pub scale_mode: sparkline::ScaleMode,
     /// The CLI `--scale` argument (stored for recomputing on reload).
     pub scale_arg: String,
+    /// Screen rects of clickable buttons in the header (play/pause, quit).
+    pub button_rects: Vec<(String, Rect)>,
+    /// Index of the button currently hovered by the mouse.
+    pub hover_button: Option<usize>,
 }
 
 impl App {
@@ -67,6 +71,8 @@ impl App {
             scroll_offset: 0,
             scale_mode: sparkline::ScaleMode::Chromatic,
             scale_arg: String::from("auto"),
+            button_rects: Vec::new(),
+            hover_button: None,
         }
     }
 
@@ -350,17 +356,62 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                 },
                 Event::Mouse(MouseEvent { kind, column, row, .. }) => match kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset);
+                        // Check if hovering over a button.
+                        let mut new_hover: Option<usize> = None;
+                        for (i, (_, rect)) in app.button_rects.iter().enumerate() {
+                            if column >= rect.x && column < rect.x + rect.width
+                                && row >= rect.y && row < rect.y + rect.height
+                            {
+                                new_hover = Some(i);
+                                break;
+                            }
+                        }
+                        if new_hover != app.hover_button {
+                            app.hover_button = new_hover;
+                            needs_redraw = true;
+                        }
+                        // Only update sparkline hover if not over a button.
+                        if app.hover_button.is_none() {
+                            app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset);
+                        } else {
+                            app.hover_col = None;
+                        }
                     }
                     MouseEventKind::Down(_) => {
-                        if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset) {
-                            let frac = if app.total_cols > 0 {
-                                col as f64 / app.total_cols as f64
-                            } else {
-                                0.0
-                            };
-                            let _ = app.seek(frac);
-                            needs_redraw = true;
+                        // Check if clicked a button.
+                        let mut clicked_btn: Option<&str> = None;
+                        for (name, rect) in &app.button_rects {
+                            if column >= rect.x && column < rect.x + rect.width
+                                && row >= rect.y && row < rect.y + rect.height
+                            {
+                                clicked_btn = Some(name.as_str());
+                                break;
+                            }
+                        }
+                        match clicked_btn {
+                            Some("play") => {
+                                if app.is_playing() {
+                                    app.stop_playback();
+                                } else if app.final_progress >= 1.0 {
+                                    let _ = app.start_playback();
+                                } else {
+                                    let _ = app.resume_playback();
+                                }
+                                needs_redraw = true;
+                            }
+                            Some("quit") => {
+                                running = false;
+                            }
+                            _ => {
+                                // Click on sparkline → seek.
+                                if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset) {
+                                    let frac = if app.total_cols > 0 {
+                                        col as f64 / app.total_cols as f64
+                                    } else { 0.0 };
+                                    let _ = app.seek(frac);
+                                    needs_redraw = true;
+                                }
+                            }
                         }
                     }
                     // Map vertical scroll wheel to horizontal timeline scroll.
@@ -511,18 +562,19 @@ fn draw_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(1),
+            Constraint::Length(3),  // header (title + controls)
+            Constraint::Min(10),   // sparkline area
         ])
         .split(f.area());
 
     draw_header(f, chunks[0], app);
     draw_sparkline_area(f, chunks[1], app);
-    draw_status(f, chunks[2], app);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::text::{Line, Span, Text};
+    use ratatui::layout::Alignment;
+
     let meta = &app.score.metadata;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -537,33 +589,107 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let mut parts: Vec<String> = Vec::new();
-    if !meta.title.is_empty() {
-        parts.push(meta.title.clone());
-    }
-    if let Some(c) = &meta.composer {
-        parts.push(c.clone());
-    }
-    if let Some(t) = &meta.tempo {
-        parts.push(format!("♪ {}", t));
-    }
-    if let Some(k) = &meta.key {
-        parts.push(format!("key: {}", k.replace("\\", "")));
-    }
-    if let Some(t) = &meta.time {
-        parts.push(format!("{}/bar", t));
-    }
-    if !visible.is_empty() {
-        parts.push(visible.join(" · "));
-    }
+    if !meta.title.is_empty() { parts.push(meta.title.clone()); }
+    if let Some(c) = &meta.composer { parts.push(c.clone()); }
+    if let Some(t) = &meta.tempo { parts.push(format!("♪ {}", t)); }
+    if let Some(k) = &meta.key { parts.push(format!("key: {}", k.replace("\\", ""))); }
+    if let Some(t) = &meta.time { parts.push(format!("{}/bar", t)); }
+    if !visible.is_empty() { parts.push(visible.join(" · ")); }
 
-    let text = if let Some(err) = &app.reload_error {
+    let left_text = if let Some(err) = &app.reload_error {
         format!("{}  —  [reload error: {err}]", parts.join("  |  "))
     } else if parts.is_empty() {
         "(no metadata)".into()
     } else {
         parts.join("  |  ")
     };
-    f.render_widget(Paragraph::new(text).block(block), area);
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Left side: metadata.
+    f.render_widget(
+        Paragraph::new(left_text).style(Style::default().fg(Color::Cyan)),
+        inner,
+    );
+
+    // Right side: clickable buttons + progress info.
+    let play_label = if app.is_playing() { "⏸ Pause" } else { "▶ Play" };
+    let progress = app.progress();
+
+    let shared_total_ticks = app
+        .parsed_tracks()
+        .iter()
+        .map(|(_, t)| t.total_ticks)
+        .max()
+        .unwrap_or(0);
+    let tempo_bpm = tempo_from(&app.score) as f64;
+    let total_sec = if tempo_bpm > 0.0 {
+        shared_total_ticks as f64 / TICKS_PER_BEAT as f64 * (60.0 / tempo_bpm)
+    } else { 0.0 };
+    let current_sec = total_sec * progress;
+
+    let progress_text = if total_sec > 0.0 {
+        format!(
+            "  {:02}:{:02} / {:02}:{:02}  {:.0}%",
+            (current_sec as u32) / 60, (current_sec as u32) % 60,
+            (total_sec as u32) / 60, (total_sec as u32) % 60,
+            progress * 100.0,
+        )
+    } else { String::new() };
+
+    let quit_label = "[q]uit";
+
+    // Build styled spans for the right side.  Buttons get backgrounds; hover
+    // changes the background to a brighter color.
+    let normal_bg = Color::DarkGray;
+    let hover_bg = Color::LightBlue;
+    let hover_idx = app.hover_button.unwrap_or(usize::MAX);
+
+    let play_len = play_label.chars().count() as u16;
+    let quit_len = quit_label.chars().count() as u16;
+    let prog_len = progress_text.chars().count() as u16;
+    let spacing: u16 = 2;
+
+    let right_total = play_len + spacing + prog_len + spacing + quit_len;
+    let start_x = inner.x + inner.width.saturating_sub(right_total);
+
+    let mut spans: Vec<Span> = Vec::new();
+    let mut button_rects: Vec<(String, Rect)> = Vec::new();
+    let mut x = start_x;
+
+    // Play/Pause button.
+    let play_bg = if hover_idx == 0 { hover_bg } else { normal_bg };
+    spans.push(Span::styled(
+        play_label,
+        Style::default().bg(play_bg).fg(Color::White),
+    ));
+    button_rects.push(("play".into(), Rect { x, y: inner.y, width: play_len, height: 1 }));
+    x += play_len;
+
+    // Progress text (not a button).
+    spans.push(Span::raw(progress_text));
+    x += prog_len;
+
+    // Spacing.
+    spans.push(Span::raw("  "));
+    x += spacing;
+
+    // Quit button.
+    let quit_bg = if hover_idx == 1 { hover_bg } else { normal_bg };
+    spans.push(Span::styled(
+        quit_label,
+        Style::default().bg(quit_bg).fg(Color::White),
+    ));
+    button_rects.push(("quit".into(), Rect { x, y: inner.y, width: quit_len, height: 1 }));
+
+    app.button_rects = button_rects;
+
+    let right_area = Rect { x: start_x, y: inner.y, width: right_total, height: 1 };
+    f.render_widget(
+        Paragraph::new(Text::from(Line::from(spans))),
+        right_area,
+    );
 }
 
 /// Draw the top border of a track, with the track name at the start and
