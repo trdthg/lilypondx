@@ -339,7 +339,7 @@ fn export_once(file: &Path, output: &Option<PathBuf>, format: &ExportFormat, tra
                 std::fs::copy(&path, &dest)?;
                 println!("Exported: {}", dest.display());
             }
-            "midi" if want_midi => {
+            "mid" | "midi" if want_midi => {
                 let dest = out_stem.with_extension("midi");
                 std::fs::copy(&path, &dest)?;
                 println!("Exported: {}", dest.display());

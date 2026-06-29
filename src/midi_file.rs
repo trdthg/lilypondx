@@ -69,12 +69,14 @@ pub fn compile_lilypond_tracks(score: &Score) -> Result<(Vec<MidiEvent>, u32, u3
     parse_midi_file(&midi_path)
 }
 
-/// Find a .midi file in the given directory.
+/// Find a MIDI file (.mid or .midi) in the given directory.
+/// LilyPond emits `.mid` even when `\bookOutputName` is used, so we accept
+/// both extensions.
 fn find_midi_in_dir(dir: &Path) -> Option<std::path::PathBuf> {
     for entry in std::fs::read_dir(dir).ok()? {
         let entry = entry.ok()?;
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "midi") {
+        if path.extension().is_some_and(|e| e == "mid" || e == "midi") {
             return Some(path);
         }
     }
