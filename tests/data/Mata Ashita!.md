@@ -28,7 +28,7 @@ d'4. cis8 d4 f2 d4 c4. b8 c4 a2. |
 ais2. g4 e d' c2. cis2. |
 d4 cis4 d4 f4 e4 d4 c4 b4 c4 a'2. |
 
-d,2 a8 d8 e4 d4 c4 <f>4-. <c>4-. <f>4-. |
+d,2 a8 d8 e4 d4 c4 <f>4-. <c>4-. <f>4-. | <f, c' f>2-.
 
 
 ```
@@ -72,6 +72,6 @@ f <a c> <a c> | f <a cis> <a cis> |
 ais, <d f> <d f> | c <f gis> <f gis> |
 c <f a> <f a> | d <fis c'> <fis c'> |
 g <ais d> <ais d> | c, <e ais> <e ais> |
-f-. c-. f-. |
+f-. c-. f-. <f c f'>2.
 
 ```

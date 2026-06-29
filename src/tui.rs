@@ -47,10 +47,12 @@ pub struct App {
     pub scale_mode: sparkline::ScaleMode,
     /// The CLI `--scale` argument (stored for recomputing on reload).
     pub scale_arg: String,
-    /// Screen rects of clickable buttons in the header (play/pause, quit).
+    /// Screen rects of clickable buttons in the header.
     pub button_rects: Vec<(String, Rect)>,
     /// Index of the button currently hovered by the mouse.
     pub hover_button: Option<usize>,
+    /// Auto-follow: scroll the sparkline to keep the playhead visible.
+    pub auto_follow: bool,
 }
 
 impl App {
@@ -73,6 +75,7 @@ impl App {
             scale_arg: String::from("auto"),
             button_rects: Vec::new(),
             hover_button: None,
+            auto_follow: true,
         }
     }
 
@@ -318,6 +321,10 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
             match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => running = false,
+                    KeyCode::Char('f') => {
+                        app.auto_follow = !app.auto_follow;
+                        needs_redraw = true;
+                    }
                     KeyCode::Char(' ') => {
                         if app.is_playing() {
                             app.stop_playback();
@@ -332,6 +339,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                         let step = (app.total_cols.max(20) / 10).max(4);
                         app.scroll_offset = app.scroll_offset.saturating_sub(step);
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     KeyCode::Right => {
@@ -339,17 +347,20 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                         let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
                         app.scroll_offset = (app.scroll_offset + step).min(max_scroll);
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     KeyCode::Home => {
                         app.scroll_offset = 0;
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     KeyCode::End => {
                         let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
                         app.scroll_offset = max_scroll;
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     _ => {}
@@ -397,6 +408,10 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                                 } else {
                                     let _ = app.resume_playback();
                                 }
+                                needs_redraw = true;
+                            }
+                            Some("follow") => {
+                                app.auto_follow = !app.auto_follow;
                                 needs_redraw = true;
                             }
                             Some("quit") => {
@@ -476,6 +491,23 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
             if Some(cur) != prev_playhead_col {
                 prev_playhead_col = Some(cur);
                 needs_redraw = true;
+            }
+
+            // Auto-follow: when playhead reaches 80% of visible width,
+            // jump so it sits at 20% from the left.
+            if app.auto_follow && total > visible_cols(&app) {
+                let vis = visible_cols(&app);
+                let playhead_in_view = cur.saturating_sub(app.scroll_offset);
+                if playhead_in_view >= vis * 7 / 8 {
+                    let target = cur.saturating_sub(vis / 8);
+                    let max_scroll = total.saturating_sub(vis);
+                    let target = target.min(max_scroll);
+                    if target != app.scroll_offset {
+                        app.scroll_offset = target;
+                        app.hover_col = None;
+                        needs_redraw = true;
+                    }
+                }
             }
         } else {
             prev_playhead_col = None;
@@ -580,21 +612,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Cyan));
 
-    let visible: Vec<&str> = app
-        .score
-        .tracks
-        .iter()
-        .filter(|t| t.syntax != "test")
-        .map(|t| t.name.as_str())
-        .collect();
-
     let mut parts: Vec<String> = Vec::new();
     if !meta.title.is_empty() { parts.push(meta.title.clone()); }
     if let Some(c) = &meta.composer { parts.push(c.clone()); }
     if let Some(t) = &meta.tempo { parts.push(format!("♪ {}", t)); }
     if let Some(k) = &meta.key { parts.push(format!("key: {}", k.replace("\\", ""))); }
-    if let Some(t) = &meta.time { parts.push(format!("{}/bar", t)); }
-    if !visible.is_empty() { parts.push(visible.join(" · ")); }
+    if let Some(t) = &meta.time { parts.push(format!("{}", t)); }
 
     let left_text = if let Some(err) = &app.reload_error {
         format!("{}  —  [reload error: {err}]", parts.join("  |  "))
@@ -615,6 +638,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Right side: clickable buttons + progress info.
     let play_label = if app.is_playing() { "⏸ Pause" } else { "▶ Play" };
+    let follow_label = if app.auto_follow { "📎 Following" } else { "📎 Fixed" };
     let progress = app.progress();
 
     let shared_total_ticks = app
@@ -644,21 +668,23 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     // changes the background to a brighter color.
     let normal_bg = Color::DarkGray;
     let hover_bg = Color::LightBlue;
+    let active_bg = Color::Blue;
     let hover_idx = app.hover_button.unwrap_or(usize::MAX);
 
     let play_len = play_label.chars().count() as u16;
+    let follow_len = follow_label.chars().count() as u16;
     let quit_len = quit_label.chars().count() as u16;
     let prog_len = progress_text.chars().count() as u16;
     let spacing: u16 = 2;
 
-    let right_total = play_len + spacing + prog_len + spacing + quit_len;
+    let right_total = play_len + spacing + prog_len + spacing + follow_len + spacing + quit_len;
     let start_x = inner.x + inner.width.saturating_sub(right_total);
 
     let mut spans: Vec<Span> = Vec::new();
     let mut button_rects: Vec<(String, Rect)> = Vec::new();
     let mut x = start_x;
 
-    // Play/Pause button.
+    // Play/Pause button (index 0).
     let play_bg = if hover_idx == 0 { hover_bg } else { normal_bg };
     spans.push(Span::styled(
         play_label,
@@ -675,8 +701,27 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     spans.push(Span::raw("  "));
     x += spacing;
 
-    // Quit button.
-    let quit_bg = if hover_idx == 1 { hover_bg } else { normal_bg };
+    // Follow button (index 1).
+    let follow_bg = if hover_idx == 1 {
+        hover_bg
+    } else if app.auto_follow {
+        active_bg
+    } else {
+        normal_bg
+    };
+    spans.push(Span::styled(
+        follow_label,
+        Style::default().bg(follow_bg).fg(Color::White),
+    ));
+    button_rects.push(("follow".into(), Rect { x, y: inner.y, width: follow_len, height: 1 }));
+    x += follow_len;
+
+    // Spacing.
+    spans.push(Span::raw("  "));
+    x += spacing;
+
+    // Quit button (index 2).
+    let quit_bg = if hover_idx == 2 { hover_bg } else { normal_bg };
     spans.push(Span::styled(
         quit_label,
         Style::default().bg(quit_bg).fg(Color::White),
