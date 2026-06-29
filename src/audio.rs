@@ -283,7 +283,21 @@ fn play_impl(
     backend_out: &Arc<Mutex<String>>,
     start_tick: u64,
 ) -> Result<(), LilypondxError> {
-    let synth = synth::create_synth()?;
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| LilypondxError::Audio("No output device found".into()))?;
+
+    let config = device
+        .default_output_config()
+        .map_err(|e| LilypondxError::Audio(format!("Failed to get output config: {e}")))?;
+
+    // Use the device's ACTUAL sample rate — not a hardcoded 44100. This fixes
+    // tempo drift and envelope distortion on devices running at 48k/96k
+    // (Windows default is often 48000, macOS 44100).
+    let device_sample_rate = config.sample_rate().0 as i32;
+
+    let synth = synth::create_synth_at(device_sample_rate)?;
     *backend_out.lock().unwrap() = synth.name().to_string();
 
     // Advance event_index past events before start_tick.
@@ -294,11 +308,10 @@ fn play_impl(
         }
     }
 
-    let samples_per_tick = (44100.0 * 60_000_000.0 / tempo_bpm.max(1) as f64)
+    let samples_per_tick = (device_sample_rate as f64 * 60_000_000.0 / tempo_bpm.max(1) as f64)
         / (ticks_per_beat as f64 * 1_000_000.0);
     let start_sample = (start_tick as f64 * samples_per_tick) as u64;
 
-    let sample_rate: u64 = 44100;
     let state = Arc::new(Mutex::new(PlaybackState {
         synth,
         events: events.to_vec(),
@@ -308,7 +321,7 @@ fn play_impl(
         left_buf: vec![0.0; 1024],
         right_buf: vec![0.0; 1024],
         // Fade in over ~30ms to avoid pops/clicks when seeking.
-        ramp_samples: if start_tick > 0 { (sample_rate / 30).max(1) } else { 0 },
+        ramp_samples: if start_tick > 0 { (device_sample_rate as u64 / 30).max(1) } else { 0 },
     }));
 
     // Clear any hanging notes from a previous synth session.
@@ -319,15 +332,6 @@ fn play_impl(
                 .process_midi_message(ch, 0xB0, 123, 0);
         }
     }
-
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| LilypondxError::Audio("No output device found".into()))?;
-
-    let config = device
-        .default_output_config()
-        .map_err(|e| LilypondxError::Audio(format!("Failed to get output config: {e}")))?;
 
     let err_slot = last_error.clone();
     let state_clone = state.clone();
