@@ -16,7 +16,7 @@ use crate::error::LilypondxError;
 use crate::note::{self, ParsedTrack};
 use crate::parser;
 use crate::score::Score;
-use crate::sparkline::{self, SparklineConfig, GRID_X_OFFSET, Theme};
+use crate::sparkline::{self, SparklineConfig, GRID_X_OFFSET};
 use crate::TICKS_PER_BEAT;
 
 /// Application state for the TUI.
@@ -419,18 +419,19 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                     MouseEventKind::Down(_) => {
                         // If settings popup is open, check popup items first.
                         if app.settings_open {
-                            let mut clicked_theme: Option<&str> = None;
+                            let mut clicked_row: Option<&str> = None;
                             for (name, rect) in &app.settings_rects {
                                 if column >= rect.x && column < rect.x + rect.width
                                     && row >= rect.y && row < rect.y + rect.height
                                 {
-                                    clicked_theme = Some(name.as_str());
+                                    clicked_row = Some(name.as_str());
                                     break;
                                 }
                             }
-                            if let Some(name) = clicked_theme {
-                                if let Some(t) = Theme::from_name(name) {
-                                    app.theme = t;
+                            if let Some(row_name) = clicked_row {
+                                // Click-to-toggle: cycle the theme to the next one.
+                                if row_name == "theme" {
+                                    app.theme = app.theme.next();
                                 }
                                 needs_redraw = true;
                             } else {
@@ -665,7 +666,6 @@ fn draw_ui(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::text::{Line, Span, Text};
-    use ratatui::layout::Alignment;
 
     let meta = &app.score.metadata;
     let block = Block::default()
@@ -677,7 +677,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(c) = &meta.composer { parts.push(c.clone()); }
     if let Some(t) = &meta.tempo { parts.push(format!("♪ {}", t)); }
     if let Some(k) = &meta.key { parts.push(format!("key: {}", k.replace("\\", ""))); }
-    if let Some(t) = &meta.time { parts.push(format!("{}", t)); }
+    if let Some(t) = &meta.time { parts.push(t.to_string()); }
 
     let left_text = if let Some(err) = &app.reload_error {
         format!("{}  —  [reload error: {err}]", parts.join("  |  "))
@@ -781,12 +781,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     x += spacing;
 
     // Settings button (index 2).
-    let settings_len: u16 = "⚙".chars().count() as u16;
+    let settings_label = "⚙ setting";
+    let settings_len: u16 = settings_label.chars().count() as u16;
     let settings_bg = if hover_idx == 2 { hover_bg }
         else if app.settings_open { active_bg }
         else { normal_bg };
     spans.push(Span::styled(
-        "⚙",
+        settings_label,
         Style::default().bg(settings_bg).fg(Color::White),
     ));
     button_rects.push(("settings".into(), Rect { x, y: inner.y, width: settings_len, height: 1 }));
@@ -814,13 +815,20 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Draw the settings popup (centered overlay).
+/// Layout: title "setting", then a list of rows where the left side is the
+/// option name and the right side is the current value. Click a row to toggle.
 fn draw_settings_popup(f: &mut Frame, app: &mut App) {
     use ratatui::widgets::{Clear, Block, Borders, Paragraph};
     use ratatui::text::{Line, Span, Text};
 
-    let themes = Theme::all();
-    let popup_height = 3 + themes.len() as u16; // title + spacer + items
-    let popup_width = 24u16;
+    // Each setting row: (label, value_string, is_bool, bool_value).
+    // For now we only have Theme (a cyclic toggle, not a bool).
+    let rows: Vec<(&str, String, bool, bool)> = vec![
+        ("Theme", app.theme.name().to_string(), false, false),
+    ];
+
+    let popup_height = 3 + rows.len() as u16; // border(2) + title-line + rows
+    let popup_width = 28u16;
     let area = f.area();
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
@@ -829,45 +837,45 @@ fn draw_settings_popup(f: &mut Frame, app: &mut App) {
         height: popup_height,
     };
 
-    // Clear the area behind the popup.
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Settings ")
+        .title(" setting ")
         .style(Style::default().fg(Color::Cyan));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
-    // Build lines: "Theme: <current>" header, then each theme option.
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("Theme: {}", app.theme.name()),
-        Style::default().fg(Color::Yellow),
-    )));
-    lines.push(Line::raw(""));
-
     let mut settings_rects: Vec<(String, Rect)> = Vec::new();
-    for (i, name) in themes.iter().enumerate() {
-        let is_current = Theme::from_name(name) == Some(app.theme);
+
+    for (i, (label, value, is_bool, bool_val)) in rows.iter().enumerate() {
         let is_hovered = app.settings_hover == Some(i);
         let style = if is_hovered {
-            Style::default().bg(Color::LightBlue).fg(Color::Black)
-        } else if is_current {
-            Style::default().bg(Color::Blue).fg(Color::White)
+            Style::default().bg(Color::DarkGray).fg(Color::White)
         } else {
             Style::default().fg(Color::Gray)
         };
-        let prefix = if is_current { "● " } else { "○ " };
-        let label = format!("{}{}", prefix, name);
-        let label_len = label.chars().count() as u16;
-        lines.push(Line::from(vec![Span::styled(label, style)]));
+
+        // Left: option name. Right: value ([x]/[ ] for bools, "Name >" for cyclic).
+        let value_str = if *is_bool {
+            if *bool_val { "[x]" } else { "[ ]" }.to_string()
+        } else {
+            format!("{} >", value)
+        };
+        let pad = (inner.width as usize)
+            .saturating_sub(label.len() + value_str.chars().count())
+            .max(1);
+        let line_str = format!("{}{}{}", label, " ".repeat(pad), value_str);
+        let line_len = line_str.chars().count() as u16;
+        lines.push(Line::from(vec![Span::styled(line_str, style)]));
+
         settings_rects.push((
-            name.to_string(),
+            "theme".to_string(),
             Rect {
                 x: inner.x,
-                y: inner.y + 2 + i as u16,
-                width: label_len.max(inner.width),
+                y: inner.y + i as u16,
+                width: line_len.max(inner.width),
                 height: 1,
             },
         ));
@@ -1083,66 +1091,4 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         );
     }
     app.track_rects = track_rects;
-}
-
-fn draw_status(f: &mut Frame, area: Rect, app: &mut App) {
-    let play_state = if app.is_playing() { "▶ Playing" } else { "⏸ Paused" };
-    let backend = app
-        .player
-        .as_ref()
-        .map(|p| p.backend_name())
-        .unwrap_or_default();
-    let progress = app.progress();
-
-    let beats_per_bar = beats_per_bar_from(&app.score);
-    let shared_total_ticks = app
-        .parsed_tracks()
-        .iter()
-        .map(|(_, t)| t.total_ticks)
-        .max()
-        .unwrap_or(0);
-    let total_bars = beats_per_bar
-        .filter(|&b| b > 0)
-        .map(|b| (shared_total_ticks as f64 / (b as f64 * TICKS_PER_BEAT as f64)).ceil() as u32)
-        .unwrap_or(0);
-    let current_bar = if total_bars > 0 {
-        ((progress * total_bars as f64).floor() as u32 + 1).min(total_bars)
-    } else {
-        0
-    };
-
-    let tempo_bpm = tempo_from(&app.score) as f64;
-    let total_sec = if tempo_bpm > 0.0 {
-        shared_total_ticks as f64 / TICKS_PER_BEAT as f64 * (60.0 / tempo_bpm)
-    } else {
-        0.0
-    };
-    let current_sec = total_sec * progress;
-
-    let mut text = format!(
-        " [q]uit  [space] play/pause  [←→] scroll  [click] seek  |  {play_state}  |  {:.0}%",
-        progress * 100.0
-    );
-    if total_bars > 0 {
-        text.push_str(&format!("  |  bar {}/{}", current_bar, total_bars));
-    }
-    if total_sec > 0.0 {
-        text.push_str(&format!(
-            "  |  {:02}:{:02} / {:02}:{:02}",
-            (current_sec as u32) / 60, (current_sec as u32) % 60,
-            (total_sec as u32) / 60, (total_sec as u32) % 60,
-        ));
-    }
-    if !backend.is_empty() {
-        text.push_str(&format!("  |  {backend}"));
-    }
-    if let Some(p) = &app.player
-        && let Some(err) = p.last_error()
-    {
-        text.push_str(&format!("  |  ! {err}"));
-    }
-    f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
 }

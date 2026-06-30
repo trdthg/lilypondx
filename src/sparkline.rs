@@ -5,25 +5,25 @@ use crate::note::ParsedTrack;
 use crate::TICKS_PER_BEAT;
 
 /// A color theme for sparkline backgrounds and foregrounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
+    /// Black & white: white keys = white bg, black keys = black bg.
+    #[default]
+    Mono,
     /// Soft pastel rainbow (original).
     Macaron,
     /// Piano-style: white keys = light gray, black keys = dark gray.
     Piano,
 }
 
-impl Default for Theme {
-    fn default() -> Self { Theme::Macaron }
-}
-
 impl Theme {
     pub fn all() -> &'static [&'static str] {
-        &["Macaron", "Piano"]
+        &["Mono", "Macaron", "Piano"]
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
+            "mono" => Some(Theme::Mono),
             "macaron" => Some(Theme::Macaron),
             "piano" => Some(Theme::Piano),
             _ => None,
@@ -32,17 +32,51 @@ impl Theme {
 
     pub fn name(self) -> &'static str {
         match self {
+            Theme::Mono => "Mono",
             Theme::Macaron => "Macaron",
             Theme::Piano => "Piano",
         }
+    }
+
+    /// Cycle to the next theme (for click-to-toggle in the settings popup).
+    pub fn next(self) -> Self {
+        match self {
+            Theme::Mono => Theme::Macaron,
+            Theme::Macaron => Theme::Piano,
+            Theme::Piano => Theme::Mono,
+        }
+    }
+}
+
+/// Foreground color for text/glyphs on a given pitch's background.
+/// Returns a color that contrasts with `bg_color(midi, theme)`.
+pub fn fg_color(midi: u8, theme: Theme) -> Color {
+    match theme {
+        Theme::Mono => {
+            // Light-gray bg → black fg; dark-gray bg → white fg.
+            match midi % 12 {
+                0 | 2 | 4 | 5 | 7 | 9 | 11 => Color::Black,
+                _ => Color::White,
+            }
+        }
+        _ => Color::Black,
     }
 }
 
 /// Background color for a pitch, based on the active theme.
 pub fn bg_color(midi: u8, theme: Theme) -> Color {
     match theme {
+        Theme::Mono => bg_color_mono(midi),
         Theme::Macaron => bg_color_macaron(midi),
         Theme::Piano => bg_color_piano(midi),
+    }
+}
+
+/// Black & white: white keys = light gray, black keys = dark gray.
+fn bg_color_mono(midi: u8) -> Color {
+    match midi % 12 {
+        0 | 2 | 4 | 5 | 7 | 9 | 11 => Color::Rgb(230, 230, 230),  // white keys: light gray
+        _ => Color::Rgb(40, 40, 40),                               // black keys: dark gray
     }
 }
 
@@ -54,17 +88,18 @@ fn bg_color_piano(midi: u8) -> Color {
     }
 }
 
-/// Soft pastel rainbow (original macaron palette).
+/// Soft pastel rainbow (macaron palette) — natural notes only.
+/// Accidentals (C#/Db, D#/Eb, ...) have NO background color.
 fn bg_color_macaron(midi: u8) -> Color {
     match midi % 12 {
-        0 | 1 => Color::Rgb(120, 140, 180),
-        2 | 3 => Color::Rgb(180, 130, 144),
-        4 => Color::Rgb(140, 172, 124),
-        5 | 6 => Color::Rgb(176, 148, 104),
-        7 | 8 => Color::Rgb(124, 160, 168),
-        9 | 10 => Color::Rgb(160, 128, 176),
-        11 => Color::Rgb(140, 140, 148),
-        _ => Color::Reset,
+        0 => Color::Rgb(120, 140, 180),   // C
+        2 => Color::Rgb(180, 130, 144),   // D
+        4 => Color::Rgb(140, 172, 124),   // E
+        5 => Color::Rgb(176, 148, 104),   // F
+        7 => Color::Rgb(124, 160, 168),   // G
+        9 => Color::Rgb(160, 128, 176),   // A
+        11 => Color::Rgb(140, 140, 148),  // B
+        _ => Color::Reset,                // accidentals: no color
     }
 }
 
@@ -420,10 +455,8 @@ pub fn render_sparkline_widget<'a>(
     for (row, &pitch) in g.rows.iter().zip(&g.label_pitches) {
         let bg = bg_color(pitch, config.theme);
         let label = pitch_label(pitch);
-        let mut spans = vec![Span::styled(
-            format!("{label} │"),
-            Style::default().bg(bg).fg(Color::Black),
-        )];
+        // Left gutter (label + │) is NOT colored — uses the terminal default.
+        let mut spans = vec![Span::raw(format!("{label} │"))];
         for (abs_col, ch) in row.chars().enumerate().skip(start_col).take(vis_cols) {
             // Playhead column gets a bright yellow background, keeping the
             // underlying glyph (`━`, ` `, `┊`, `▌`) visible.
@@ -432,9 +465,17 @@ pub fn render_sparkline_widget<'a>(
             } else if ch == '|' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if ch == '━' {
-                Style::default().bg(bg).fg(Color::Black)
+                // Note bar color: blue on Mono, black on Macaron/Piano.
+                let note_fg = match config.theme {
+                    Theme::Mono => Color::Blue,
+                    _ => Color::Black,
+                };
+                Style::default().bg(bg).fg(note_fg)
+            } else if ch == '▌' {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
-                Style::default().bg(bg).fg(Color::Gray)
+                // Empty cells and bar lines use the themed bg, no foreground.
+                Style::default().bg(bg)
             };
             spans.push(Span::styled(ch.to_string(), style));
         }
@@ -472,7 +513,7 @@ pub fn render_sparkline_widget<'a>(
     (Text::from(lines), g.total_cols)
 }
 
-/// Old single-arg bg_color removed — use `bg_color(midi, theme)` instead.
+// Old single-arg bg_color removed — use `bg_color(midi, theme)` instead.
 
 /// How many rows (lines) a track's sparkline will occupy (pitch rows only),
 /// excluding the optional progress bar. For TUI height allocation per voice.
