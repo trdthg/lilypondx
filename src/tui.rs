@@ -262,7 +262,7 @@ pub fn run_tui(file: PathBuf, _width: usize, _rows: usize, no_watch: bool, scale
     let score = parser::parse_markdown(&source)?;
     let mut app = App::new(score);
     app.scale_arg = scale.clone();
-    app.scale_mode = resolve_scale_mode(&app.score, &scale);
+    app.scale_mode = sparkline::resolve_scale_mode(&app.score, &scale);
     app.start_playback()?;
 
     run_tui_loop(app, file, is_url, !no_watch)
@@ -529,7 +529,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                     app.reload_error = None;
                     app.scroll_offset = 0;
                     app.set_score(new_score);
-                    app.scale_mode = resolve_scale_mode(&app.score, &app.scale_arg);
+                    app.scale_mode = sparkline::resolve_scale_mode(&app.score, &app.scale_arg);
                     let _ = app.start_playback();
                     needs_redraw = true;
                 }
@@ -616,37 +616,6 @@ fn screen_x_to_col(x: u16, y: u16, track_rects: &[Rect], grid_rect: Rect, scroll
 /// - "auto": detect from frontmatter `key`, or infer from notes.
 /// - "chromatic": show all rows.
 /// - key string like "c major": parse and use that scale.
-fn resolve_scale_mode(score: &Score, arg: &str) -> sparkline::ScaleMode {
-    match arg.trim() {
-        "chromatic" => sparkline::ScaleMode::Chromatic,
-        "auto" => {
-            // 1. Try frontmatter `key`, then auto-detect from all tracks' pitches.
-            if let Some(k) = &score.metadata.key
-                && let Some(mode) = sparkline::parse_key(k)
-            {
-                return mode;
-            }
-            // 2. Auto-detect from all tracks' pitches.
-            let parsed: Vec<crate::note::ParsedTrack> = score
-                .tracks
-                .iter()
-                .map(|t| note::parse_notes_relative(&t.notes, &t.relative, TICKS_PER_BEAT))
-                .collect();
-            // Combine all pitches and detect.
-            let combined = crate::note::ParsedTrack {
-                notes: parsed.iter().flat_map(|p| p.notes.iter().cloned()).collect(),
-                total_ticks: parsed.iter().map(|p| p.total_ticks).max().unwrap_or(0),
-            };
-            sparkline::detect_scale(&combined)
-                .map(|(_, mask, _)| sparkline::ScaleMode::Diatonic(mask))
-                .unwrap_or(sparkline::ScaleMode::Chromatic)
-        }
-        key_str => {
-            sparkline::parse_key(key_str).unwrap_or(sparkline::ScaleMode::Chromatic)
-        }
-    }
-}
-
 fn draw_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -889,24 +858,24 @@ fn draw_settings_popup(f: &mut Frame, app: &mut App) {
     );
 }
 
-/// Draw the top border of a track, with the track name at the start and
-/// optional bar numbers (first track only).
-#[allow(clippy::too_many_arguments)]
-fn draw_track_top_border(
-    f: &mut Frame,
-    area: Rect,
-    track_name: &str,
+/// Context for drawing a track's top border.
+struct TrackBorderCtx<'a> {
+    track_name: &'a str,
     show_bar_numbers: bool,
     beats_per_bar: Option<u32>,
     total_ticks: Option<u64>,
     visible_width: usize,
     scroll_offset: usize,
-) {
+}
+
+/// Draw the top border of a track, with the track name at the start and
+/// optional bar numbers (first track only).
+fn draw_track_top_border(f: &mut Frame, area: Rect, ctx: TrackBorderCtx) {
     let line_width = area.width.saturating_sub(2) as usize;
     let mut buf: Vec<char> = vec!['─'; line_width];
 
     // Insert track name at the beginning: `─ RH ─`.
-    let label = format!(" {} ", track_name);
+    let label = format!(" {} ", ctx.track_name);
     for (i, c) in label.chars().enumerate() {
         if i < line_width {
             buf[i] = c;
@@ -914,8 +883,8 @@ fn draw_track_top_border(
     }
 
     // Bar numbers (first track only).
-    if show_bar_numbers
-        && let (Some(bpb), Some(total)) = (beats_per_bar, total_ticks)
+    if ctx.show_bar_numbers
+        && let (Some(bpb), Some(total)) = (ctx.beats_per_bar, ctx.total_ticks)
         && bpb > 0
         && total > 0
     {
@@ -938,10 +907,10 @@ fn draw_track_top_border(
             let base = (bt / tpc) as usize;
             let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
             let col = base + bars_before;
-            if col < scroll_offset || col >= scroll_offset + visible_width {
+            if col < ctx.scroll_offset || col >= ctx.scroll_offset + ctx.visible_width {
                 continue;
             }
-            let vis_col = col - scroll_offset;
+            let vis_col = col - ctx.scroll_offset;
             let pos = GRID_X_OFFSET as usize + vis_col;
             let num_str = bar_number.to_string();
             let num_len = num_str.len();
@@ -1046,12 +1015,14 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         draw_track_top_border(
             f,
             top_rect,
-            name,
-            i == 0,
-            beats_per_bar,
-            shared_total_ticks,
-            visible_width,
-            scroll_offset,
+            TrackBorderCtx {
+                track_name: name,
+                show_bar_numbers: i == 0,
+                beats_per_bar,
+                total_ticks: shared_total_ticks,
+                visible_width,
+                scroll_offset,
+            },
         );
 
         // Skip the top-border row in the inner area.

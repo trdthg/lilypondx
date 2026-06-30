@@ -6,8 +6,6 @@ use std::sync::Arc;
 
 use crate::error::LilypondxError;
 
-const SAMPLE_RATE: i32 = 44100;
-
 /// Trait unifying the SoundFont and built-in synthesizers.
 pub trait Synth: Send {
     fn process_midi_message(&mut self, channel: i32, command: i32, data1: i32, data2: i32);
@@ -209,12 +207,8 @@ pub fn find_soundfont() -> Option<PathBuf> {
     candidates.iter().find(|p| p.exists()).map(|p| p.to_path_buf())
 }
 
-/// Create the best available synthesizer at the default sample rate.
-pub fn create_synth() -> Result<Box<dyn Synth>, LilypondxError> {
-    create_synth_at(SAMPLE_RATE)
-}
-
-/// Create a synthesizer at a specific sample rate (exposed for tests).
+/// Create a synthesizer at the given sample rate.
+/// Uses SoundFont if available, otherwise the built-in oscillator.
 pub fn create_synth_at(sample_rate: i32) -> Result<Box<dyn Synth>, LilypondxError> {
     if let Some(path) = find_soundfont() {
         let data = std::fs::read(&path)?;

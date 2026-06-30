@@ -130,7 +130,9 @@ fn main() -> Result<(), LilypondxError> {
         Command::Gen { file, output, tablature, parts } => cmd_gen(&file, output, tablature, parts),
         Command::Dump { file, rows: _, scale } => cmd_dump(&file, &scale),
         Command::New { file } => cmd_new(file),
-        Command::Export { file, output, format, transpose, tablature, watch, parts } => cmd_export(&file, output, format, transpose, tablature, watch, parts),
+        Command::Export { file, output, format, transpose, tablature, watch, parts } => {
+            cmd_export(&file, output, watch, ExportOptions { format, transpose, tablature, parts })
+        }
     }
 }
 
@@ -250,14 +252,17 @@ c1 | c1 | f,1 | g'2 c,2 |
     Ok(())
 }
 
-fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transpose: Option<i32>, tablature: bool, watch: bool, parts: ExportParts) -> Result<(), LilypondxError> {
+/// Export options, bundled to avoid 8-param function signatures.
+struct ExportOptions {
+    format: ExportFormat,
+    transpose: Option<i32>,
+    tablature: bool,
+    parts: ExportParts,
+}
+
+fn cmd_export(file: &Path, output: Option<PathBuf>, watch: bool, opts: ExportOptions) -> Result<(), LilypondxError> {
     use notify::Watcher;
-    let parts_str = match parts {
-        ExportParts::Split => "split",
-        ExportParts::Combined => "combined",
-    };
     if watch {
-        // Watch loop: re-export on file change.
         let canonical = file.canonicalize()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
@@ -272,8 +277,7 @@ fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transp
             .watch(&canonical, notify::RecursiveMode::NonRecursive)
             .map_err(|e| LilypondxError::Io(std::io::Error::other(e)))?;
 
-        // Initial export.
-        export_once(file, &output, &format, transpose, tablature, parts_str)?;
+        export_once(file, &output, &opts)?;
 
         let debounce = std::time::Duration::from_millis(300);
         let mut last_change: Option<std::time::Instant> = None;
@@ -285,27 +289,30 @@ fn cmd_export(file: &Path, output: Option<PathBuf>, format: ExportFormat, transp
                 && ts.elapsed() >= debounce
             {
                 last_change = None;
-                match export_once(file, &output, &format, transpose, tablature, parts_str) {
-                    Ok(()) => {}
-                    Err(e) => eprintln!("Export error: {e}"),
+                if let Err(e) = export_once(file, &output, &opts) {
+                    eprintln!("Export error: {e}");
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     } else {
-        export_once(file, &output, &format, transpose, tablature, parts_str)
+        export_once(file, &output, &opts)
     }
 }
 
-fn export_once(file: &Path, output: &Option<PathBuf>, format: &ExportFormat, transpose: Option<i32>, tablature: bool, parts: &str) -> Result<(), LilypondxError> {
+fn export_once(file: &Path, output: &Option<PathBuf>, opts: &ExportOptions) -> Result<(), LilypondxError> {
+    let parts_str = match opts.parts {
+        ExportParts::Split => "split",
+        ExportParts::Combined => "combined",
+    };
     let mut score = parser::parse_markdown(&file.to_string_lossy())?;
-    if transpose.is_some() {
-        score.metadata.transpose = transpose;
+    if opts.transpose.is_some() {
+        score.metadata.transpose = opts.transpose;
     }
-    if tablature {
+    if opts.tablature {
         score.metadata.tablature = true;
     }
-    score.metadata.parts = Some(parts.to_string());
+    score.metadata.parts = Some(parts_str.to_string());
     let ly = ly_gen::generate_ly(&score);
 
     let out_stem = output.clone().unwrap_or_else(|| file.with_extension(""));
@@ -326,8 +333,8 @@ fn export_once(file: &Path, output: &Option<PathBuf>, format: &ExportFormat, tra
         return Err(LilypondxError::LilypondError(stderr.to_string()));
     }
 
-    let want_pdf = matches!(format, ExportFormat::Pdf | ExportFormat::Both);
-    let want_midi = matches!(format, ExportFormat::Midi | ExportFormat::Both);
+    let want_pdf = matches!(opts.format, ExportFormat::Pdf | ExportFormat::Both);
+    let want_midi = matches!(opts.format, ExportFormat::Midi | ExportFormat::Both);
 
     for entry in std::fs::read_dir(tmp.path())? {
         let entry = entry?;
@@ -355,9 +362,9 @@ fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
     let score = parser::parse_markdown(&file.to_string_lossy())?;
 
     // Resolve scale mode.
-    let scale_mode = resolve_scale_mode(&score, scale);
+    let scale_mode = lilypondx::sparkline::resolve_scale_mode(&score, scale);
 
-    // Parse all non-test / non-lilypond tracks for sparkline display.
+    // Parse all lilypondx tracks for sparkline display.
     // lilypond blocks go through the real LilyPond compiler, not our parser.
     let beats_per_bar = score
         .metadata
@@ -396,37 +403,4 @@ fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
         println!();
     }
     Ok(())
-}
-
-/// Resolve the `--scale` CLI argument into a `ScaleMode` (mirrors TUI logic).
-fn resolve_scale_mode(score: &lilypondx::score::Score, arg: &str) -> lilypondx::sparkline::ScaleMode {
-    use lilypondx::note;
-    use lilypondx::sparkline;
-    use lilypondx::TICKS_PER_BEAT;
-
-    match arg.trim() {
-        "chromatic" => sparkline::ScaleMode::Chromatic,
-        "auto" => {
-            if let Some(k) = &score.metadata.key
-                && let Some(mode) = sparkline::parse_key(k)
-            {
-                return mode;
-            }
-            let parsed: Vec<note::ParsedTrack> = score
-                .tracks
-                .iter()
-                .map(|t| note::parse_notes_relative(&t.notes, &t.relative, TICKS_PER_BEAT))
-                .collect();
-            let combined = note::ParsedTrack {
-                notes: parsed.iter().flat_map(|p| p.notes.iter().cloned()).collect(),
-                total_ticks: parsed.iter().map(|p| p.total_ticks).max().unwrap_or(0),
-            };
-            sparkline::detect_scale(&combined)
-                .map(|(_, mask, _)| sparkline::ScaleMode::Diatonic(mask))
-                .unwrap_or(sparkline::ScaleMode::Chromatic)
-        }
-        key_str => {
-            sparkline::parse_key(key_str).unwrap_or(sparkline::ScaleMode::Chromatic)
-        }
-    }
 }

@@ -1,6 +1,6 @@
 //! End-to-end pipeline tests: parse → notes → sparkline → MIDI events.
 
-use lilypondx::audio::generate_events_direct;
+use lilypondx::audio::generate_events;
 use lilypondx::note::parse_notes_relative;
 use lilypondx::parser;
 use lilypondx::sparkline::{render_sparkline, SparklineConfig};
@@ -21,7 +21,7 @@ fn multitrack_pipeline() {
         assert!(!spark.is_empty(), "track {} should render", track.name);
     }
 
-    let events = generate_events_direct(&score, TICKS_PER_BEAT);
+    let (events, _bpm) = generate_events(&score, TICKS_PER_BEAT).expect("generate events");
     assert!(!events.is_empty(), "should generate MIDI events");
     assert!(
         events.iter().any(|e| e.command == 0x90),
@@ -40,7 +40,7 @@ fn lilypond_test_blocks_excluded_from_playback() {
     // but must NOT contribute MIDI events to playback.
     let score = parser::parse_markdown("tests/data/render_ascending.md")
         .expect("parse");
-    let events = generate_events_direct(&score, TICKS_PER_BEAT);
+    let (events, _) = generate_events(&score, TICKS_PER_BEAT).expect("generate events");
     // The single `lilypond` block has 4 notes → at least 4 NoteOns.
     let note_ons = events.iter().filter(|e| e.command == 0x90).count();
     assert_eq!(note_ons, 4, "test blocks must not produce MIDI events");

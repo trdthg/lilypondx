@@ -90,14 +90,6 @@ pub fn generate_events(score: &Score, ticks_per_beat: u32) -> Result<(Vec<MidiEv
     Ok((events, tempo_bpm))
 }
 
-/// Deprecated: kept for compatibility.
-/// Use `generate_events` instead.
-pub fn generate_events_direct(score: &Score, ticks_per_beat: u32) -> Vec<MidiEvent> {
-    generate_events(score, ticks_per_beat)
-        .map(|(ev, _)| ev)
-        .unwrap_or_default()
-}
-
 /// Map instrument name to General MIDI program number.
 fn midi_program(name: &str) -> u8 {
     match name.to_lowercase().as_str() {

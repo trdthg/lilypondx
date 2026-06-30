@@ -1,7 +1,8 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::note::ParsedTrack;
+use crate::note::{self, ParsedTrack};
+use crate::score::Score;
 use crate::TICKS_PER_BEAT;
 
 /// A color theme for sparkline backgrounds and foregrounds.
@@ -45,21 +46,6 @@ impl Theme {
             Theme::Macaron => Theme::Piano,
             Theme::Piano => Theme::Mono,
         }
-    }
-}
-
-/// Foreground color for text/glyphs on a given pitch's background.
-/// Returns a color that contrasts with `bg_color(midi, theme)`.
-pub fn fg_color(midi: u8, theme: Theme) -> Color {
-    match theme {
-        Theme::Mono => {
-            // Light-gray bg → black fg; dark-gray bg → white fg.
-            match midi % 12 {
-                0 | 2 | 4 | 5 | 7 | 9 | 11 => Color::Black,
-                _ => Color::White,
-            }
-        }
-        _ => Color::Black,
     }
 }
 
@@ -207,6 +193,36 @@ struct GridData {
     total_ticks: u64,
     /// Column of the playback head (for widget styling), if progress is set.
     playhead_col: Option<usize>,
+}
+
+/// Resolve a `--scale` CLI argument (or "auto") into a `ScaleMode`.
+/// Shared by the CLI `dump` command and the TUI.
+pub fn resolve_scale_mode(score: &Score, arg: &str) -> ScaleMode {
+    match arg.trim() {
+        "chromatic" => ScaleMode::Chromatic,
+        "auto" => {
+            // 1. Try frontmatter `key`, then auto-detect from all tracks' pitches.
+            if let Some(k) = &score.metadata.key
+                && let Some(mode) = parse_key(k)
+            {
+                return mode;
+            }
+            // 2. Auto-detect from all tracks' pitches.
+            let parsed: Vec<ParsedTrack> = score
+                .tracks
+                .iter()
+                .map(|t| note::parse_notes_relative(&t.notes, &t.relative, TICKS_PER_BEAT))
+                .collect();
+            let combined = ParsedTrack {
+                notes: parsed.iter().flat_map(|p| p.notes.iter().cloned()).collect(),
+                total_ticks: parsed.iter().map(|p| p.total_ticks).max().unwrap_or(0),
+            };
+            detect_scale(&combined)
+                .map(|(_, mask, _)| ScaleMode::Diatonic(mask))
+                .unwrap_or(ScaleMode::Chromatic)
+        }
+        key_str => parse_key(key_str).unwrap_or(ScaleMode::Chromatic),
+    }
 }
 
 /// Width of the left gutter before grid content: pitch label (3) + " │" (2) = 5.
