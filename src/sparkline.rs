@@ -481,9 +481,14 @@ pub fn render_sparkline_widget<'a>(
             } else if ch == '|' {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if ch == '━' {
-                // Note bar color: blue on Mono, black on Macaron/Piano.
+                // Note bar color: Mono uses contrast-aware grays (dark on
+                // light-gray white-key rows, light on dark-gray black-key
+                // rows). Macaron/Piano use solid black.
                 let note_fg = match config.theme {
-                    Theme::Mono => Color::Blue,
+                    Theme::Mono => match pitch % 12 {
+                        0 | 2 | 4 | 5 | 7 | 9 | 11 => Color::Rgb(60, 60, 60),  // white keys: dark gray
+                        _ => Color::Rgb(200, 200, 200),                        // black keys: light gray
+                    },
                     _ => Color::Black,
                 };
                 Style::default().bg(bg).fg(note_fg)
