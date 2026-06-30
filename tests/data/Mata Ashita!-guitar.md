@@ -9,10 +9,10 @@ time: "6/8"
 
 # Mata Ashita!
 ```lilypondx track=RH clef=treble relative=c''
-a2 c4 f2 a,4 ais2 d4 g,2. |
-ais2 d4 g,4. f8 e d' c1.  |
-a2 c4 f2 | a,4 ais2 d4 g,2. |
-ais2 d4 g,4. | f8 e g f1~ f4 c'8 cis |
+a2\2 c4\2 f2 a,4\2 ais2\2 d4 g,2.\2 |
+ais2\2 d4 g,4.\2 f8\2 e\2 d' c1.  |
+a2\2 c4\2 f2 | a,4\2 ais2\2 d4 g,2.\2 |
+ais2\2 d4 g,4.\2 | f8\2 e\2 g\2 f1\2~ f4\2 c'8 cis |
 
 d4. cis8 d4 f2 d4 c4. b8 c4 a2. |
 ais2. g4 e d' c2~c8 | cis8 d4. cis8 |

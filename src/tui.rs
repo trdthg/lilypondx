@@ -16,7 +16,7 @@ use crate::error::LilypondxError;
 use crate::note::{self, ParsedTrack};
 use crate::parser;
 use crate::score::Score;
-use crate::sparkline::{self, SparklineConfig, GRID_X_OFFSET};
+use crate::sparkline::{self, SparklineConfig, GRID_X_OFFSET, Theme};
 use crate::TICKS_PER_BEAT;
 
 /// Application state for the TUI.
@@ -53,6 +53,14 @@ pub struct App {
     pub hover_button: Option<usize>,
     /// Auto-follow: scroll the sparkline to keep the playhead visible.
     pub auto_follow: bool,
+    /// Color theme.
+    pub theme: sparkline::Theme,
+    /// Settings popup open?
+    pub settings_open: bool,
+    /// Hovered item in the settings popup.
+    pub settings_hover: Option<usize>,
+    /// Clickable setting rows.
+    pub settings_rects: Vec<(String, Rect)>,
 }
 
 impl App {
@@ -76,6 +84,10 @@ impl App {
             button_rects: Vec::new(),
             hover_button: None,
             auto_follow: true,
+            theme: sparkline::Theme::default(),
+            settings_open: false,
+            settings_hover: None,
+            settings_rects: Vec::new(),
         }
     }
 
@@ -367,39 +379,78 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                 },
                 Event::Mouse(MouseEvent { kind, column, row, .. }) => match kind {
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        // Check if hovering over a button.
-                        let mut new_hover: Option<usize> = None;
-                        for (i, (_, rect)) in app.button_rects.iter().enumerate() {
-                            if column >= rect.x && column < rect.x + rect.width
-                                && row >= rect.y && row < rect.y + rect.height
-                            {
-                                new_hover = Some(i);
-                                break;
+                        // If settings popup is open, check popup items.
+                        if app.settings_open {
+                            let mut new_hover: Option<usize> = None;
+                            for (i, (_, rect)) in app.settings_rects.iter().enumerate() {
+                                if column >= rect.x && column < rect.x + rect.width
+                                    && row >= rect.y && row < rect.y + rect.height
+                                {
+                                    new_hover = Some(i);
+                                    break;
+                                }
                             }
-                        }
-                        if new_hover != app.hover_button {
-                            app.hover_button = new_hover;
-                            needs_redraw = true;
-                        }
-                        // Only update sparkline hover if not over a button.
-                        if app.hover_button.is_none() {
-                            app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset);
+                            if new_hover != app.settings_hover {
+                                app.settings_hover = new_hover;
+                                needs_redraw = true;
+                            }
                         } else {
-                            app.hover_col = None;
+                            // Check if hovering over a header button.
+                            let mut new_hover: Option<usize> = None;
+                            for (i, (_, rect)) in app.button_rects.iter().enumerate() {
+                                if column >= rect.x && column < rect.x + rect.width
+                                    && row >= rect.y && row < rect.y + rect.height
+                                {
+                                    new_hover = Some(i);
+                                    break;
+                                }
+                            }
+                            if new_hover != app.hover_button {
+                                app.hover_button = new_hover;
+                                needs_redraw = true;
+                            }
+                            if app.hover_button.is_none() {
+                                app.hover_col = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset);
+                            } else {
+                                app.hover_col = None;
+                            }
                         }
                     }
                     MouseEventKind::Down(_) => {
-                        // Check if clicked a button.
-                        let mut clicked_btn: Option<&str> = None;
-                        for (name, rect) in &app.button_rects {
-                            if column >= rect.x && column < rect.x + rect.width
-                                && row >= rect.y && row < rect.y + rect.height
-                            {
-                                clicked_btn = Some(name.as_str());
-                                break;
+                        // If settings popup is open, check popup items first.
+                        if app.settings_open {
+                            let mut clicked_theme: Option<&str> = None;
+                            for (name, rect) in &app.settings_rects {
+                                if column >= rect.x && column < rect.x + rect.width
+                                    && row >= rect.y && row < rect.y + rect.height
+                                {
+                                    clicked_theme = Some(name.as_str());
+                                    break;
+                                }
                             }
-                        }
-                        match clicked_btn {
+                            if let Some(name) = clicked_theme {
+                                if let Some(t) = Theme::from_name(name) {
+                                    app.theme = t;
+                                }
+                                needs_redraw = true;
+                            } else {
+                                // Click outside popup → close it.
+                                app.settings_open = false;
+                                app.settings_hover = None;
+                                needs_redraw = true;
+                            }
+                        } else {
+                            // Check if clicked a header button.
+                            let mut clicked_btn: Option<&str> = None;
+                            for (name, rect) in &app.button_rects {
+                                if column >= rect.x && column < rect.x + rect.width
+                                    && row >= rect.y && row < rect.y + rect.height
+                                {
+                                    clicked_btn = Some(name.as_str());
+                                    break;
+                                }
+                            }
+                            match clicked_btn {
                             Some("play") => {
                                 if app.is_playing() {
                                     app.stop_playback();
@@ -412,6 +463,10 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                             }
                             Some("follow") => {
                                 app.auto_follow = !app.auto_follow;
+                                needs_redraw = true;
+                            }
+                            Some("settings") => {
+                                app.settings_open = !app.settings_open;
                                 needs_redraw = true;
                             }
                             Some("quit") => {
@@ -428,6 +483,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                                 }
                             }
                         }
+                        } // end else (settings not open)
                     }
                     // Map vertical scroll wheel to horizontal timeline scroll.
                     // Terminal protocols don't expose horizontal swipe, so the
@@ -594,13 +650,17 @@ fn draw_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header (title + controls)
-            Constraint::Min(10),   // sparkline area
+            Constraint::Length(3),
+            Constraint::Min(10),
         ])
         .split(f.area());
 
     draw_header(f, chunks[0], app);
     draw_sparkline_area(f, chunks[1], app);
+
+    if app.settings_open {
+        draw_settings_popup(f, app);
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
@@ -677,7 +737,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     let prog_len = progress_text.chars().count() as u16;
     let spacing: u16 = 2;
 
-    let right_total = play_len + spacing + prog_len + spacing + follow_len + spacing + quit_len;
+    let right_total = play_len + spacing + prog_len + spacing + follow_len + spacing + 1 + spacing + quit_len;
     let start_x = inner.x + inner.width.saturating_sub(right_total);
 
     let mut spans: Vec<Span> = Vec::new();
@@ -720,8 +780,24 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     spans.push(Span::raw("  "));
     x += spacing;
 
-    // Quit button (index 2).
-    let quit_bg = if hover_idx == 2 { hover_bg } else { normal_bg };
+    // Settings button (index 2).
+    let settings_len: u16 = "⚙".chars().count() as u16;
+    let settings_bg = if hover_idx == 2 { hover_bg }
+        else if app.settings_open { active_bg }
+        else { normal_bg };
+    spans.push(Span::styled(
+        "⚙",
+        Style::default().bg(settings_bg).fg(Color::White),
+    ));
+    button_rects.push(("settings".into(), Rect { x, y: inner.y, width: settings_len, height: 1 }));
+    x += settings_len;
+
+    // Spacing.
+    spans.push(Span::raw("  "));
+    x += spacing;
+
+    // Quit button (index 3).
+    let quit_bg = if hover_idx == 3 { hover_bg } else { normal_bg };
     spans.push(Span::styled(
         quit_label,
         Style::default().bg(quit_bg).fg(Color::White),
@@ -734,6 +810,74 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(
         Paragraph::new(Text::from(Line::from(spans))),
         right_area,
+    );
+}
+
+/// Draw the settings popup (centered overlay).
+fn draw_settings_popup(f: &mut Frame, app: &mut App) {
+    use ratatui::widgets::{Clear, Block, Borders, Paragraph};
+    use ratatui::text::{Line, Span, Text};
+
+    let themes = Theme::all();
+    let popup_height = 3 + themes.len() as u16; // title + spacer + items
+    let popup_width = 24u16;
+    let area = f.area();
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(popup_width)) / 2,
+        y: area.y + (area.height.saturating_sub(popup_height)) / 2,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the area behind the popup.
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Settings ")
+        .style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Build lines: "Theme: <current>" header, then each theme option.
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("Theme: {}", app.theme.name()),
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::raw(""));
+
+    let mut settings_rects: Vec<(String, Rect)> = Vec::new();
+    for (i, name) in themes.iter().enumerate() {
+        let is_current = Theme::from_name(name) == Some(app.theme);
+        let is_hovered = app.settings_hover == Some(i);
+        let style = if is_hovered {
+            Style::default().bg(Color::LightBlue).fg(Color::Black)
+        } else if is_current {
+            Style::default().bg(Color::Blue).fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let prefix = if is_current { "● " } else { "○ " };
+        let label = format!("{}{}", prefix, name);
+        let label_len = label.chars().count() as u16;
+        lines.push(Line::from(vec![Span::styled(label, style)]));
+        settings_rects.push((
+            name.to_string(),
+            Rect {
+                x: inner.x,
+                y: inner.y + 2 + i as u16,
+                width: label_len.max(inner.width),
+                height: 1,
+            },
+        ));
+    }
+
+    app.settings_rects = settings_rects;
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines)),
+        inner,
     );
 }
 
@@ -916,6 +1060,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             hover_col: app.hover_col,
             show_progress_bar: i == n_visible - 1,
             scale_mode,
+            theme: app.theme,
         };
         let (text, _) = sparkline::render_sparkline_widget(parsed_track, &config, scroll_offset, visible_width);
 

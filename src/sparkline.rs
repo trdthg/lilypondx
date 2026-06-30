@@ -4,6 +4,70 @@ use ratatui::text::{Line, Span, Text};
 use crate::note::ParsedTrack;
 use crate::TICKS_PER_BEAT;
 
+/// A color theme for sparkline backgrounds and foregrounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    /// Soft pastel rainbow (original).
+    Macaron,
+    /// Piano-style: white keys = light gray, black keys = dark gray.
+    Piano,
+}
+
+impl Default for Theme {
+    fn default() -> Self { Theme::Macaron }
+}
+
+impl Theme {
+    pub fn all() -> &'static [&'static str] {
+        &["Macaron", "Piano"]
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "macaron" => Some(Theme::Macaron),
+            "piano" => Some(Theme::Piano),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Macaron => "Macaron",
+            Theme::Piano => "Piano",
+        }
+    }
+}
+
+/// Background color for a pitch, based on the active theme.
+pub fn bg_color(midi: u8, theme: Theme) -> Color {
+    match theme {
+        Theme::Macaron => bg_color_macaron(midi),
+        Theme::Piano => bg_color_piano(midi),
+    }
+}
+
+/// Piano-style: white keys (C D E F G A B) = light gray, black keys = dark gray.
+fn bg_color_piano(midi: u8) -> Color {
+    match midi % 12 {
+        0 | 2 | 4 | 5 | 7 | 9 | 11 => Color::Rgb(200, 200, 205),  // white keys
+        _ => Color::Rgb(80, 80, 85),                                // black keys
+    }
+}
+
+/// Soft pastel rainbow (original macaron palette).
+fn bg_color_macaron(midi: u8) -> Color {
+    match midi % 12 {
+        0 | 1 => Color::Rgb(120, 140, 180),
+        2 | 3 => Color::Rgb(180, 130, 144),
+        4 => Color::Rgb(140, 172, 124),
+        5 | 6 => Color::Rgb(176, 148, 104),
+        7 | 8 => Color::Rgb(124, 160, 168),
+        9 | 10 => Color::Rgb(160, 128, 176),
+        11 => Color::Rgb(140, 140, 148),
+        _ => Color::Reset,
+    }
+}
+
 /// Which pitch rows to show in the sparkline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
@@ -31,6 +95,8 @@ pub struct SparklineConfig {
     pub show_progress_bar: bool,
     /// Which pitch rows to show.
     pub scale_mode: ScaleMode,
+    /// Color theme.
+    pub theme: Theme,
 }
 
 /// Major scale interval pattern (semitone offsets from tonic): W W H W W W H
@@ -352,7 +418,7 @@ pub fn render_sparkline_widget<'a>(
     let vis_cols = end_col - start_col;
 
     for (row, &pitch) in g.rows.iter().zip(&g.label_pitches) {
-        let bg = bg_color(pitch);
+        let bg = bg_color(pitch, config.theme);
         let label = pitch_label(pitch);
         let mut spans = vec![Span::styled(
             format!("{label} │"),
@@ -406,22 +472,7 @@ pub fn render_sparkline_widget<'a>(
     (Text::from(lines), g.total_cols)
 }
 
-/// Background color for a pitch (rainbow by pitch class). Each accidental
-/// shares the natural's color below it so backgrounds are continuous.
-/// Uses light, low-saturation RGB pastels that blend softly with the
-/// terminal background.
-fn bg_color(midi: u8) -> Color {
-    match midi % 12 {
-        0 => Color::Rgb(120, 140, 180),  // C  — soft slate blue
-        2 => Color::Rgb(180, 130, 144),  // D  — soft rose
-        4 => Color::Rgb(140, 172, 124),      // E  — soft sage
-        5 => Color::Rgb(176, 148, 104),  // F  — soft amber
-        7 => Color::Rgb(124, 160, 168),  // G  — soft teal
-        9 => Color::Rgb(160, 128, 176), // A  — soft lavender
-        11 => Color::Rgb(140, 140, 148),      // B  — soft neutral gray
-        _ => Color::Reset,
-    }
-}
+/// Old single-arg bg_color removed — use `bg_color(midi, theme)` instead.
 
 /// How many rows (lines) a track's sparkline will occupy (pitch rows only),
 /// excluding the optional progress bar. For TUI height allocation per voice.
