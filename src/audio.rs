@@ -194,7 +194,17 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new(events: Vec<MidiEvent>, ticks_per_beat: u32, tempo_bpm: u32) -> Self {
-        let total_ticks = events.iter().map(|e| e.tick).max().unwrap_or(0);
+        Self::new_with_total(events, ticks_per_beat, tempo_bpm, 0)
+    }
+
+    /// Create with an explicit `total_ticks` (the musical piece length, not
+    /// just the last MIDI event's tick). If 0, falls back to last event tick.
+    pub fn new_with_total(events: Vec<MidiEvent>, ticks_per_beat: u32, tempo_bpm: u32, total: u64) -> Self {
+        let total_ticks = if total > 0 {
+            total
+        } else {
+            events.iter().map(|e| e.tick).max().unwrap_or(0)
+        };
         Self {
             events,
             ticks_per_beat,
@@ -243,6 +253,13 @@ impl AudioPlayer {
             return 0.0;
         }
         (self.current_tick.load(Ordering::Relaxed) as f64 / self.total_ticks as f64).min(1.0)
+    }
+
+    /// The audio engine's total tick count (max event tick). Use this for
+    /// playhead mapping so the head covers the full MIDI range, not just the
+    /// parsed note durations which may differ.
+    pub fn total_ticks(&self) -> u64 {
+        self.total_ticks
     }
 
     /// Last playback error captured by the audio thread, if any.
@@ -420,7 +437,6 @@ fn audio_callback(
     let actual_tick;
     {
         let mut cs = control.lock().unwrap();
-        actual_tick = (cs.sample_count as f64 / cs.samples_per_tick) as u64;
 
         let ramp = cs.ramp_samples;
         if ramp > 0 {
@@ -433,7 +449,10 @@ fn audio_callback(
             }
             cs.ramp_samples = ramp.saturating_sub(half as u64);
         }
+        // Advance sample_count FIRST, then read actual_tick so the playhead
+        // reflects the audio that was just rendered (not one buffer behind).
         cs.sample_count += half as u64;
+        actual_tick = (cs.sample_count as f64 / cs.samples_per_tick) as u64;
     }
 
     // Interleave into the output buffer (no lock).

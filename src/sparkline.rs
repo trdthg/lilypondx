@@ -5,6 +5,56 @@ use crate::note::{self, ParsedTrack};
 use crate::score::Score;
 use crate::TICKS_PER_BEAT;
 
+/// Ticks per grid column = 1 semiquaver (16th note).
+/// Every tick↔col conversion in the codebase MUST use this constant.
+pub const TICKS_PER_COL: u64 = TICKS_PER_BEAT as u64 / 4;
+
+/// Generate the list of bar-line ticks from `ticks_per_bar`.
+/// Each entry is a tick position where a bar line is drawn.
+pub fn bar_tick_list(ticks_per_bar: Option<u64>, total_ticks: u64) -> Vec<u64> {
+    let Some(b) = ticks_per_bar.filter(|&b| b > 0) else {
+        return Vec::new();
+    };
+    let mut v = Vec::new();
+    let mut t = b;
+    while t < total_ticks {
+        v.push(t);
+        t += b;
+    }
+    v
+}
+
+/// Map a tick to a grid column (forward mapping).
+/// This is the SINGLE SOURCE OF TRUTH for tick→col — TUI's playhead and
+/// col_to_tick both call this.
+pub fn tick_to_col(tick: u64, bar_ticks: &[u64]) -> usize {
+    let base = (tick / TICKS_PER_COL) as usize;
+    let bars_at_or_before = bar_ticks.iter().filter(|&&bt| bt <= tick).count();
+    base + bars_at_or_before
+}
+
+/// Map a grid column back to a tick (inverse of `tick_to_col`).
+/// Due to quantization (TICKS_PER_COL ticks per column), the result is
+/// always a multiple of TICKS_PER_COL — clicking can't seek finer than
+/// one semiquaver. This matches the visual resolution.
+pub fn col_to_tick(col: usize, ticks_per_bar: Option<u64>, total_ticks: u64) -> u64 {
+    let bar_ticks = bar_tick_list(ticks_per_bar, total_ticks);
+    // Bar line columns: at each bt, the bar line sits at base + bars_strictly_before.
+    let bar_line_cols: Vec<usize> = bar_ticks
+        .iter()
+        .enumerate()
+        .map(|(i, &bt)| (bt / TICKS_PER_COL) as usize + i)
+        .collect();
+    let bars_here = bar_line_cols.iter().filter(|&&bc| bc <= col).count();
+    ((col - bars_here) as u64 * TICKS_PER_COL).min(total_ticks)
+}
+
+/// Compute total grid columns for a timeline, including bar-line columns.
+pub fn total_cols(total_ticks: u64, ticks_per_bar: Option<u64>) -> usize {
+    let bar_ticks = bar_tick_list(ticks_per_bar, total_ticks);
+    tick_to_col(total_ticks, &bar_ticks).max(1)
+}
+
 /// A color theme for sparkline backgrounds and foregrounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
@@ -108,12 +158,14 @@ pub struct SparklineConfig {
     pub total_ticks_override: Option<u64>,
     /// Playback progress 0.0–1.0 (drives the bottom progress bar).
     pub progress: Option<f64>,
-    /// Beats per bar (from time signature, e.g. 4 for 4/4). Draws bar lines.
-    pub beats_per_bar: Option<u32>,
+    /// Ticks per bar (from time signature). Draws bar lines at each multiple.
+    pub ticks_per_bar: Option<u64>,
     /// Column index to highlight (mouse hover). Vertical `▌` through rows.
     pub hover_col: Option<usize>,
-    /// Draw the progress bar below the grid (only one voice should set this).
-    pub show_progress_bar: bool,
+    /// Playback head column — computed ONCE by the caller and shared across
+    /// all voices so they stay in sync. If set, overrides the per-track
+    /// progress-based computation in build_grid.
+    pub playhead_col: Option<usize>,
     /// Which pitch rows to show.
     pub scale_mode: ScaleMode,
     /// Color theme.
@@ -190,7 +242,6 @@ struct GridData {
     /// Pitch (MIDI) for each row, highest first.
     label_pitches: Vec<u8>,
     total_cols: usize,
-    total_ticks: u64,
     /// Column of the playback head (for widget styling), if progress is set.
     playhead_col: Option<usize>,
 }
@@ -250,11 +301,11 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     // render on their own row instead of being snapped to a nearby in-key row.
     let used_pcs: u16 = pitches.iter().fold(0u16, |acc, &p| acc | (1 << (p % 12)));
 
-    // Build the list of row pitches: every semitone between (min-1) and
-    // (max+1), but skip rows that are neither in the scale nor actually
-    // used in the track.
-    let lo = min_p.saturating_sub(1);
-    let hi = max_p.saturating_add(1);
+    // Build the list of row pitches: only semitones between min and max
+    // (inclusive) that are in-scale or actually used. No ±1 padding — rows
+    // without notes just waste vertical space.
+    let lo = min_p;
+    let hi = max_p;
     let mut label_pitches: Vec<u8> = Vec::new();
     for p in (lo..=hi).rev() {
         let in_scale = scale_mask.is_none_or(|m| (m & (1 << (p % 12))) != 0);
@@ -275,50 +326,20 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     };
 
     let total_ticks = config.total_ticks_override.unwrap_or(track.total_ticks).max(1);
-    let ticks_per_beat = TICKS_PER_BEAT as u64;
-    let ticks_per_col = ticks_per_beat / 4; // quarter-beat per column (16th note = 1 col)
+    let ticks_per_col = TICKS_PER_COL;
 
-    // Bar boundaries (in ticks). Each gets a dedicated extra column in the
-    // grid, so bar lines don't steal space from notes — every bar still has
-    // its full `bpb * 2` columns of note area.
-    let bar_ticks: Vec<u64> = config
-        .beats_per_bar
-        .filter(|&b| b > 0)
-        .map(|b| {
-            let bar_len = b as u64 * TICKS_PER_BEAT as u64;
-            let mut v = Vec::new();
-            let mut t = bar_len;
-            while t < total_ticks {
-                v.push(t);
-                t += bar_len;
-            }
-            v
-        })
-        .unwrap_or_default();
+    // Bar boundaries + tick→col mapping use the shared public functions so
+    // TUI's playhead/col_to_tick stay perfectly in sync with build_grid.
+    let bar_ticks = bar_tick_list(config.ticks_per_bar, total_ticks);
+    let total_cols = tick_to_col(total_ticks, &bar_ticks).max(1);
 
-    // Map a tick to a grid column: note columns come from tick/tpc, plus one
-    // extra column inserted at each bar boundary. The bar line column sits at
-    // the boundary; notes starting at the boundary begin one column later.
-    let tick_to_col = |tick: u64| -> usize {
-        let base = (tick / ticks_per_col) as usize;
-        // Notes at or after a bar boundary get +1 so the bar line has its own
-        // column to the left of the note.
-        let bars_at_or_before = bar_ticks.iter().filter(|&&bt| bt <= tick).count();
-        base + bars_at_or_before
-    };
-
-    // total_cols includes the inserted bar columns.
-    let total_cols = tick_to_col(total_ticks).max(1);
     // Bar line columns: at each bar boundary bt, the bar line occupies the
     // column that would correspond to bt if notes didn't get the +1 shift,
     // i.e. base + (bars strictly before bt).
     let bar_cols: std::collections::HashSet<usize> = bar_ticks
         .iter()
-        .map(|&bt| {
-            let base = (bt / ticks_per_col) as usize;
-            let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
-            base + bars_before
-        })
+        .enumerate()
+        .map(|(i, &bt)| (bt / ticks_per_col) as usize + i)
         .collect();
 
     // Build the grid as a Vec<String> (one per row) for easy overlay.
@@ -331,7 +352,7 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
     }
     for note in &track.notes {
         let note_tick = note.start_tick;
-        let start_col = tick_to_col(note_tick);
+        let start_col = tick_to_col(note_tick, &bar_ticks);
         // For the end column, use strict `<` so a note ending exactly at a
         // bar boundary doesn't paint over the bar line column.
         let end_tick = note_tick + note.duration as u64;
@@ -358,57 +379,52 @@ fn build_grid(track: &ParsedTrack, config: &SparklineConfig) -> Option<GridData>
         }
     }
 
-    // Playback head column: computed from progress, snapping to note spans.
-    //  - While a pitched note sounds: track the exact tick within [start, end),
-    //    so the head walks along long notes.
-    //  - During a rest: snap to the next pitched note's onset column.
-    //  - Past the last note: hold at the last pitched note's onset.
-    // The head is NOT drawn into the grid (that would erase `━` glyphs);
-    // instead we return its column and the widget renderer styles it yellow.
-    // The head never sits on a bar-line column — if it would, it snaps to the
-    // previous note column instead.
-    let playhead_col = config.progress.and_then(|p| {
-        let p = p.clamp(0.0, 1.0);
-        let current_tick = (p * total_ticks as f64).round() as u64;
-        let mut snap: Option<usize> = None;
-        let mut last_pitched: Option<usize> = None;
-        for note in &track.notes {
-            let start = note.start_tick;
-            let end = start + note.duration as u64;
-            if !note.pitches.is_empty() {
-                last_pitched = Some(tick_to_col(start));
-            }
-            if snap.is_none() && current_tick < end {
-                if !note.pitches.is_empty() {
-                    let note_start_col = tick_to_col(start);
-                    let col = tick_to_col(current_tick);
-                    snap = Some(if col < note_start_col || bar_cols.contains(&col) {
-                        note_start_col
-                    } else {
-                        col
-                    });
-                }
-                break;
-            }
-        }
-        // Past the last note: hold at the last column (end of piece).
-        if snap.is_none() && current_tick >= total_ticks {
-            snap = Some(total_cols.saturating_sub(1));
-        }
-        // Rest: snap to next upcoming pitched note.
-        if snap.is_none() {
+    // Playback head column: if the caller already computed it (shared across
+    // all voices for sync), use that. Otherwise compute from progress.
+    let playhead_col = if let Some(pc) = config.playhead_col {
+        Some(pc)
+    } else {
+        config.progress.and_then(|p| {
+            let p = p.clamp(0.0, 1.0);
+            let current_tick = (p * total_ticks as f64).round() as u64;
+            let mut snap: Option<usize> = None;
+            let mut last_pitched: Option<usize> = None;
             for note in &track.notes {
-                if current_tick <= note.start_tick && !note.pitches.is_empty() {
-                    snap = Some(tick_to_col(note.start_tick));
+                let start = note.start_tick;
+                let end = start + note.duration as u64;
+                if !note.pitches.is_empty() {
+                    last_pitched = Some(tick_to_col(start, &bar_ticks));
+                }
+                if snap.is_none() && current_tick < end {
+                    if !note.pitches.is_empty() {
+        let note_start_col = tick_to_col(start, &bar_ticks);
+                    let col = tick_to_col(current_tick, &bar_ticks);
+                        snap = Some(if col < note_start_col || bar_cols.contains(&col) {
+                            note_start_col
+                        } else {
+                            col
+                        });
+                    }
                     break;
                 }
             }
-        }
-        snap.or(last_pitched).filter(|&c| c < total_cols)
-    });
+            if snap.is_none() && current_tick >= total_ticks {
+                snap = Some(total_cols.saturating_sub(1));
+            }
+            if snap.is_none() {
+                for note in &track.notes {
+                    if current_tick <= note.start_tick && !note.pitches.is_empty() {
+                        snap = Some(tick_to_col(note.start_tick, &bar_ticks));
+                        break;
+                    }
+                }
+            }
+            snap.or(last_pitched).filter(|&c| c < total_cols)
+        })
+    };
 
     let rows: Vec<String> = grid.into_iter().map(|r| r.into_iter().collect()).collect();
-    Some(GridData { rows, label_pitches, total_cols, total_ticks, playhead_col })
+    Some(GridData { rows, label_pitches, total_cols, playhead_col })
 }
 
 /// Render a sparkline as plain text (no styling). For `dump` and tests.
@@ -425,7 +441,6 @@ pub fn render_sparkline(track: &ParsedTrack, config: &SparklineConfig) -> String
         out.push('\n');
     }
 
-    append_progress_bar(&mut out, &g, config);
     // Trim trailing whitespace so output matches test fixtures (which are trimmed).
     out.trim_end().to_string()
 }
@@ -503,34 +518,6 @@ pub fn render_sparkline_widget<'a>(
         lines.push(Line::from(spans));
     }
 
-    if config.show_progress_bar
-        && let Some(p) = config.progress
-    {
-        let p = p.clamp(0.0, 1.0);
-        let marker_col = (p * (g.total_cols.saturating_sub(1)) as f64) as usize;
-        let mut s = String::from("   ");
-        for col in start_col..end_col {
-            if col == marker_col {
-                s.push('▶');
-            } else if col < marker_col {
-                s.push('━');
-            } else {
-                s.push('─');
-            }
-        }
-        let pct = (p * 100.0) as u32;
-        if g.total_ticks > 0 {
-            let total_sec = g.total_ticks as f64 / TICKS_PER_BEAT as f64 * (60.0 / 120.0);
-            let current_sec = total_sec * p;
-            s.push_str(&format!(
-                "  {:02}:{:02} / {:02}:{:02}  {}%",
-                (current_sec as u32) / 60, (current_sec as u32) % 60,
-                (total_sec as u32) / 60, (total_sec as u32) % 60, pct,
-            ));
-        }
-        lines.push(Line::from(Span::raw(s)));
-    }
-
     (Text::from(lines), g.total_cols)
 }
 
@@ -553,8 +540,8 @@ pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
     }
     let min_p = *pitches.iter().min().unwrap();
     let max_p = *pitches.iter().max().unwrap();
-    let lo = min_p.saturating_sub(1);
-    let hi = max_p.saturating_add(1);
+    let lo = min_p;
+    let hi = max_p;
     let scale_mask = match mode {
         ScaleMode::Chromatic => None,
         ScaleMode::Diatonic(m) => Some(m),
@@ -569,56 +556,7 @@ pub fn row_count_with_scale(track: &ParsedTrack, mode: ScaleMode) -> usize {
         .count()
 }
 
-/// Count grid columns for a timeline (shared util for mouse mapping).
-/// Count grid columns for a timeline, including inserted bar-line columns.
-pub fn total_cols(total_ticks: u64, beats_per_bar: Option<u32>) -> usize {
-    let tpc = TICKS_PER_BEAT as u64 / 4;
-    let base = (total_ticks.max(1) / tpc) as usize;
-    let bar_count = beats_per_bar
-        .filter(|&b| b > 0)
-        .map(|b| {
-            let bar_len = b as u64 * TICKS_PER_BEAT as u64;
-            let mut n = 0;
-            let mut t = bar_len;
-            while t < total_ticks {
-                n += 1;
-                t += bar_len;
-            }
-            n
-        })
-        .unwrap_or(0);
-    base + bar_count
-}
 
-fn append_progress_bar(out: &mut String, g: &GridData, config: &SparklineConfig) {
-    if !config.show_progress_bar {
-        return;
-    }
-    let Some(p) = config.progress else { return };
-    let p = p.clamp(0.0, 1.0);
-    let marker_col = (p * (g.total_cols.saturating_sub(1)) as f64) as usize;
-    out.push('\n');
-    out.push_str("   ");
-    for col in 0..g.total_cols {
-        if col == marker_col {
-            out.push('▶');
-        } else if col < marker_col {
-            out.push('━');
-        } else {
-            out.push('─');
-        }
-    }
-    let pct = (p * 100.0) as u32;
-    if g.total_ticks > 0 {
-        let total_sec = g.total_ticks as f64 / TICKS_PER_BEAT as f64 * (60.0 / 120.0);
-        let current_sec = total_sec * p;
-        out.push_str(&format!(
-            "  {:02}:{:02} / {:02}:{:02}  {}%",
-            (current_sec as u32) / 60, (current_sec as u32) % 60,
-            (total_sec as u32) / 60, (total_sec as u32) % 60, pct,
-        ));
-    }
-}
 
 /// Fixed-width 3-char label: [accidental][note][octave]. ` C4`, `#F4`.
 pub fn pitch_label(midi: u8) -> String {
@@ -626,5 +564,9 @@ pub fn pitch_label(midi: u8) -> String {
     let accs = [' ', '#', ' ', '#', ' ', ' ', '#', ' ', '#', ' ', '#', ' '];
     let idx = (midi % 12) as usize;
     let octave = (midi as i32 / 12) - 1;
-    format!("{}{}{}", accs[idx], notes[idx], octave)
+    if accs[idx] == '#' {
+        format!("#{}{}", notes[idx], octave)
+    } else {
+        format!(" {}{}", notes[idx], octave)
+    }
 }

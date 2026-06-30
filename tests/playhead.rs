@@ -4,11 +4,11 @@ use lilypondx::sparkline::{render_sparkline_widget, SparklineConfig};
 use lilypondx::TICKS_PER_BEAT;
 use std::path::Path;
 
-fn playhead_col(notes: &str, relative: &str, tick: u64, beats_per_bar: Option<u32>) -> Option<usize> {
+fn playhead_col(notes: &str, relative: &str, tick: u64, ticks_per_bar: Option<u64>) -> Option<usize> {
     let parsed = parse_notes_relative(notes, relative, TICKS_PER_BEAT);
     let config = SparklineConfig {
         progress: Some(tick as f64 / parsed.total_ticks as f64),
-        beats_per_bar,
+        ticks_per_bar,
         total_ticks_override: Some(parsed.total_ticks),
         ..Default::default()
     };
@@ -20,17 +20,16 @@ fn playhead_col(notes: &str, relative: &str, tick: u64, beats_per_bar: Option<u3
     })
 }
 
-fn tick_to_col(tick: u64, total_ticks: u64, beats_per_bar: Option<u32>) -> usize {
+fn tick_to_col(tick: u64, total_ticks: u64, ticks_per_bar: Option<u64>) -> usize {
     let tpc = TICKS_PER_BEAT as u64 / 4;
-    let bar_ticks: Vec<u64> = beats_per_bar
+    let bar_ticks: Vec<u64> = ticks_per_bar
         .filter(|&b| b > 0)
         .map(|b| {
-            let bar_len = b as u64 * TICKS_PER_BEAT as u64;
             let mut ticks = Vec::new();
-            let mut t = bar_len;
+            let mut t = b;
             while t < total_ticks {
                 ticks.push(t);
-                t += bar_len;
+                t += b;
             }
             ticks
         })
@@ -57,12 +56,13 @@ fn mata_ashita_playhead_after_sixteenth_notes() {
     let score = parse_markdown(Path::new("tests/data/Mata Ashita!.md").to_string_lossy().as_ref()).unwrap();
     let rh = score.tracks.iter().find(|t| t.name == "RH").unwrap();
     let parsed = parse_notes_relative(&rh.notes, &rh.relative, TICKS_PER_BEAT);
-    let beats_per_bar = Some(6);
+    // 6/8 time: 6 beats × (480*4/8) = 6 × 240 = 1440 ticks per bar
+    let ticks_per_bar = Some(1440u64);
 
     for tick in [44640, 44700, 44760, 44820, 44880, 45120, 45360, 46080] {
         let config = SparklineConfig {
             progress: Some(tick as f64 / parsed.total_ticks as f64),
-            beats_per_bar,
+            ticks_per_bar,
             total_ticks_override: Some(parsed.total_ticks),
             ..Default::default()
         };
@@ -74,7 +74,7 @@ fn mata_ashita_playhead_after_sixteenth_notes() {
         });
         assert_eq!(
             actual,
-            Some(tick_to_col(tick, parsed.total_ticks, beats_per_bar)),
+            Some(tick_to_col(tick, parsed.total_ticks, ticks_per_bar)),
             "Mata Ashita RH playhead mismatch at tick {tick}"
         );
     }

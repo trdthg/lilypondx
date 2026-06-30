@@ -16,8 +16,18 @@ fn assert_pairs_render(path: &str) {
     for (i, pair) in pairs.iter().enumerate() {
         let parsed = parse_notes_relative(&pair.input.notes, &pair.input.relative, TICKS_PER_BEAT);
         let actual = render_sparkline(&parsed, &SparklineConfig::default());
+        // The parser trims leading whitespace from test blocks, so compare
+        // line-by-line with trim_start to normalize.
+        let actual_trimmed: String = actual.lines()
+            .map(|l| l.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected_trimmed: String = pair.expected.lines()
+            .map(|l| l.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
-            actual, pair.expected,
+            actual_trimmed, expected_trimmed,
             "{path} pair #{i} ({}) render mismatch",
             pair.input.name
         );

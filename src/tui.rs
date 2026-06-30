@@ -135,13 +135,7 @@ impl App {
 
     pub fn start_playback(&mut self) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
-            cached.clone()
-        } else {
-            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
-            self.cached_events = Some((ev.clone(), bpm));
-            (ev, bpm)
-        };
+        let (events, tempo_bpm) = self.get_events()?;
         if events.is_empty() {
             return Ok(());
         }
@@ -154,17 +148,12 @@ impl App {
 
     /// Resume playback from the paused position (final_progress).
     pub fn resume_playback(&mut self) -> Result<(), LilypondxError> {
-        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
-            cached.clone()
-        } else {
-            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
-            self.cached_events = Some((ev.clone(), bpm));
-            (ev, bpm)
-        };
+        let (events, tempo_bpm) = self.get_events()?;
         if events.is_empty() {
             return Ok(());
         }
-        let total = events.iter().map(|e| e.tick).max().unwrap_or(0);
+        let total = self.player.as_ref().map_or(0, |p| p.total_ticks());
+        let total = if total > 0 { total } else { events.iter().map(|e| e.tick).max().unwrap_or(0) };
         let target_tick = ((self.final_progress.clamp(0.0, 1.0) * total as f64).round() as u64).min(total);
         let player = AudioPlayer::new(events, TICKS_PER_BEAT, tempo_bpm);
         player.play_background_from(target_tick)?;
@@ -200,13 +189,7 @@ impl App {
     /// Seek to a fractional position; restart playback from there.
     pub fn seek(&mut self, fraction: f64) -> Result<(), LilypondxError> {
         self.stop_playback();
-        let (events, tempo_bpm) = if let Some(ref cached) = self.cached_events {
-            cached.clone()
-        } else {
-            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
-            self.cached_events = Some((ev.clone(), bpm));
-            (ev, bpm)
-        };
+        let (events, tempo_bpm) = self.get_events()?;
         if events.is_empty() {
             return Ok(());
         }
@@ -216,6 +199,17 @@ impl App {
         player.play_background_from(target_tick)?;
         self.player = Some(player);
         Ok(())
+    }
+
+    /// Get events from cache or generate fresh.
+    fn get_events(&mut self) -> Result<(Vec<crate::audio::MidiEvent>, u32), LilypondxError> {
+        if let Some(ref cached) = self.cached_events {
+            Ok(cached.clone())
+        } else {
+            let (ev, bpm) = crate::audio::generate_events(&self.score, TICKS_PER_BEAT)?;
+            self.cached_events = Some((ev.clone(), bpm));
+            Ok((ev, bpm))
+        }
     }
 }
 
@@ -229,16 +223,19 @@ fn tempo_from(score: &Score) -> u32 {
         .unwrap_or(120)
 }
 
-fn beats_per_bar_from(score: &Score) -> Option<u32> {
-    score
-        .metadata
-        .time
-        .as_deref()?
-        .split('/')
-        .next()?
-        .trim()
-        .parse()
-        .ok()
+/// Compute the number of ticks per bar from the time signature.
+/// e.g. 4/4 → 4 × 480 = 1920, 6/8 → 6 × 240 = 1440, 3/4 → 3 × 480 = 1440.
+/// The beat unit depends on the denominator (4 = quarter, 8 = eighth, 2 = half).
+fn ticks_per_bar_from(score: &Score) -> Option<u64> {
+    let time = score.metadata.time.as_deref()?;
+    let (num, den) = time.split_once('/')?;
+    let num: u32 = num.trim().parse().ok()?;
+    let den: u32 = den.trim().parse().ok()?;
+    if den == 0 {
+        return None;
+    }
+    let ticks_per_beat_unit = TICKS_PER_BEAT as u64 * 4 / den as u64;
+    Some(num as u64 * ticks_per_beat_unit)
 }
 
 /// RAII guard: restores the terminal on drop (even on panic).
@@ -476,8 +473,19 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                             _ => {
                                 // Click on sparkline → seek.
                                 if let Some(col) = screen_x_to_col(column, row, &app.track_rects, app.grid_rect, app.scroll_offset) {
-                                    let frac = if app.total_cols > 0 {
-                                        col as f64 / app.total_cols as f64
+                                    // Use the SAME total as the playhead (audio
+                                    // engine's total_ticks) so click↔playhead
+                                    // stay in the same column space.
+                                    let total = app.player.as_ref()
+                                        .map(|p| p.total_ticks())
+                                        .filter(|&t| t > 0)
+                                        .unwrap_or_else(|| {
+                                            app.parsed_tracks().iter()
+                                                .map(|(_, t)| t.total_ticks).max().unwrap_or(0)
+                                        });
+                                    let frac = if app.total_cols > 0 && total > 0 {
+                                        let tick = sparkline::col_to_tick(col, ticks_per_bar_from(&app.score), total);
+                                        tick as f64 / total as f64
                                     } else { 0.0 };
                                     let _ = app.seek(frac);
                                     needs_redraw = true;
@@ -494,6 +502,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                         let step = visible_cols(&app).max(8) / 4;
                         app.scroll_offset = app.scroll_offset.saturating_sub(step);
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     MouseEventKind::ScrollDown => {
@@ -501,6 +510,7 @@ fn run_tui_loop(mut app: App, file: PathBuf, is_url: bool, should_watch_local: b
                         let max_scroll = app.total_cols.saturating_sub(visible_cols(&app));
                         app.scroll_offset = (app.scroll_offset + step).min(max_scroll);
                         app.hover_col = None;
+                        app.auto_follow = false;
                         needs_redraw = true;
                     }
                     _ => {}
@@ -706,12 +716,20 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     let prog_len = progress_text.chars().count() as u16;
     let spacing: u16 = 2;
 
-    let right_total = play_len + spacing + prog_len + spacing + follow_len + spacing + 1 + spacing + quit_len;
+    let right_total = prog_len + spacing + play_len + spacing + follow_len + spacing + 1 + spacing + quit_len;
     let start_x = inner.x + inner.width.saturating_sub(right_total);
 
     let mut spans: Vec<Span> = Vec::new();
     let mut button_rects: Vec<(String, Rect)> = Vec::new();
     let mut x = start_x;
+
+    // Progress text (not a button) — sits left of the play/pause button.
+    spans.push(Span::raw(progress_text));
+    x += prog_len;
+
+    // Spacing.
+    spans.push(Span::raw("  "));
+    x += spacing;
 
     // Play/Pause button (index 0).
     let play_bg = if hover_idx == 0 { hover_bg } else { normal_bg };
@@ -721,10 +739,6 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     ));
     button_rects.push(("play".into(), Rect { x, y: inner.y, width: play_len, height: 1 }));
     x += play_len;
-
-    // Progress text (not a button).
-    spans.push(Span::raw(progress_text));
-    x += prog_len;
 
     // Spacing.
     spans.push(Span::raw("  "));
@@ -862,7 +876,7 @@ fn draw_settings_popup(f: &mut Frame, app: &mut App) {
 struct TrackBorderCtx<'a> {
     track_name: &'a str,
     show_bar_numbers: bool,
-    beats_per_bar: Option<u32>,
+    ticks_per_bar: Option<u64>,
     total_ticks: Option<u64>,
     visible_width: usize,
     scroll_offset: usize,
@@ -884,29 +898,17 @@ fn draw_track_top_border(f: &mut Frame, area: Rect, ctx: TrackBorderCtx) {
 
     // Bar numbers (first track only).
     if ctx.show_bar_numbers
-        && let (Some(bpb), Some(total)) = (ctx.beats_per_bar, ctx.total_ticks)
+        && let (Some(bpb), Some(total)) = (ctx.ticks_per_bar, ctx.total_ticks)
         && bpb > 0
         && total > 0
     {
-        let tpc = TICKS_PER_BEAT as u64 / 4;
-        let bar_len = bpb as u64 * TICKS_PER_BEAT as u64;
-        let bar_ticks: Vec<u64> = {
-            let mut v = Vec::new();
-            let mut t = bar_len;
-            while t < total {
-                v.push(t);
-                t += bar_len;
-            }
-            v
-        };
+        let bar_ticks = sparkline::bar_tick_list(Some(bpb), total);
         for (i, &bt) in bar_ticks.iter().enumerate() {
             let bar_number = i + 2;
             if bar_number % 4 != 0 {
                 continue;
             }
-            let base = (bt / tpc) as usize;
-            let bars_before = bar_ticks.iter().filter(|&&b| b < bt).count();
-            let col = base + bars_before;
+            let col = sparkline::tick_to_col(bt, &bar_ticks);
             if col < ctx.scroll_offset || col >= ctx.scroll_offset + ctx.visible_width {
                 continue;
             }
@@ -954,9 +956,16 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
 
     let parsed_snapshot: Vec<(String, ParsedTrack)> = app.parsed_tracks().to_vec();
     let progress = app.progress();
-    let beats_per_bar = beats_per_bar_from(&app.score);
-    let shared_total_ticks = parsed_snapshot.iter().map(|(_, t)| t.total_ticks).max();
-    let total_cols = shared_total_ticks.map_or(0, |t| sparkline::total_cols(t, beats_per_bar));
+    let ticks_per_bar = ticks_per_bar_from(&app.score);
+    // Use the audio engine's total_ticks (max MIDI event tick) for playhead
+    // mapping — it stays in sync with what the audio is actually playing.
+    let shared_total_ticks = app
+        .player
+        .as_ref()
+        .map(|p| p.total_ticks())
+        .filter(|&t| t > 0)
+        .or_else(|| parsed_snapshot.iter().map(|(_, t)| t.total_ticks).max());
+    let total_cols = shared_total_ticks.map_or(0, |t| sparkline::total_cols(t, ticks_per_bar));
     app.total_cols = total_cols;
     // Reserve 2 for left/right border + GRID_X_OFFSET for the label gutter.
     let visible_width = total_cols.min(area.width.saturating_sub(GRID_X_OFFSET + 2) as usize);
@@ -964,6 +973,20 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
     clamp_scroll(app);
     let scroll_offset = app.scroll_offset;
     let scale_mode = app.scale_mode;
+
+    // Compute the playhead column ONCE from progress + shared timeline,
+    // so all voices show the head at the same horizontal position.
+    let playhead_col = shared_total_ticks.and_then(|total| {
+        if total == 0 || total_cols == 0 {
+            return None;
+        }
+        let p = progress.clamp(0.0, 1.0);
+        let current_tick = (p * total as f64).round() as u64;
+        // Use the shared tick_to_col so playhead stays in sync with build_grid.
+        let bar_ticks = sparkline::bar_tick_list(ticks_per_bar, total);
+        let col = sparkline::tick_to_col(current_tick, &bar_ticks);
+        Some(col.min(total_cols.saturating_sub(1)))
+    });
 
     let row_counts: Vec<usize> = visible
         .iter()
@@ -987,7 +1010,6 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
-    let n_visible = visible.len();
     let mut track_rects: Vec<Rect> = Vec::new();
     for (i, (name, _clef)) in visible.iter().enumerate() {
         if i >= track_areas.len() {
@@ -1018,7 +1040,7 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
             TrackBorderCtx {
                 track_name: name,
                 show_bar_numbers: i == 0,
-                beats_per_bar,
+                ticks_per_bar,
                 total_ticks: shared_total_ticks,
                 visible_width,
                 scroll_offset,
@@ -1034,10 +1056,10 @@ fn draw_sparkline_area(f: &mut Frame, area: Rect, app: &mut App) {
 
         let config = SparklineConfig {
             progress: Some(progress),
-            beats_per_bar,
+            ticks_per_bar,
             total_ticks_override: shared_total_ticks,
             hover_col: app.hover_col,
-            show_progress_bar: i == n_visible - 1,
+            playhead_col,
             scale_mode,
             theme: app.theme,
         };

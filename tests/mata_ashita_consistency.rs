@@ -27,12 +27,17 @@ fn mata_ashita_sparkline_identical() {
     let score_x = parse_markdown(lilypondx_path).unwrap();
     let score_l = parse_markdown(lilypond_temp).unwrap();
 
-    let beats_per_bar: Option<u32> = score_x
+    let ticks_per_bar: Option<u64> = score_x
         .metadata
         .time
         .as_deref()
-        .and_then(|t| t.split('/').next())
-        .and_then(|s| s.trim().parse().ok());
+        .and_then(|t| {
+            let (num, den) = t.split_once('/')?;
+            let num: u32 = num.trim().parse().ok()?;
+            let den: u32 = den.trim().parse().ok()?;
+            if den == 0 { return None; }
+            Some(num as u64 * TICKS_PER_BEAT as u64 * 4 / den as u64)
+        });
 
     // For each track, parse with internal parser and compare render.
     for label in &["RH", "LH"] {
@@ -48,7 +53,7 @@ fn mata_ashita_sparkline_identical() {
 
         let shared_total = px.total_ticks.max(pl.total_ticks);
         let cfg = SparklineConfig {
-            beats_per_bar,
+            ticks_per_bar,
             total_ticks_override: Some(shared_total),
             ..Default::default()
         };

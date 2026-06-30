@@ -366,12 +366,14 @@ fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
 
     // Parse all lilypondx tracks for sparkline display.
     // lilypond blocks go through the real LilyPond compiler, not our parser.
-    let beats_per_bar = score
-        .metadata
-        .time
-        .as_deref()
-        .and_then(|t| t.split('/').next())
-        .and_then(|s| s.trim().parse::<u32>().ok());
+    // Compute ticks_per_bar from the time signature.
+    let ticks_per_bar: Option<u64> = score.metadata.time.as_deref().and_then(|t| {
+        let (num, den) = t.split_once('/')?;
+        let num: u32 = num.trim().parse().ok()?;
+        let den: u32 = den.trim().parse().ok()?;
+        if den == 0 { return None; }
+        Some(num as u64 * lilypondx::TICKS_PER_BEAT as u64 * 4 / den as u64)
+    });
     let parsed: Vec<(&str, &str, note::ParsedTrack)> = score
         .tracks
         .iter()
@@ -388,12 +390,10 @@ fn cmd_dump(file: &Path, scale: &str) -> Result<(), LilypondxError> {
     }
     let shared_total_ticks = parsed.iter().map(|(_, _, p)| p.total_ticks).max();
 
-    let n = parsed.len();
-    for (idx, (name, clef, parsed)) in parsed.iter().enumerate() {
+    for (name, clef, parsed) in parsed.iter() {
         let cfg = sparkline::SparklineConfig {
-            beats_per_bar,
+            ticks_per_bar,
             total_ticks_override: shared_total_ticks,
-            show_progress_bar: idx == n - 1,
             scale_mode,
             ..Default::default()
         };
